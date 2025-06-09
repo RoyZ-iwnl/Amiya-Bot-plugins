@@ -2,6 +2,7 @@ import os
 import html
 import time
 import asyncio
+import re
 
 from amiyabot import QQGuildBotInstance
 from amiyabot.builtin.message import MessageStructure
@@ -40,6 +41,11 @@ class WeiboRecord(MessageBaseModel):
     record_time: int = IntegerField()
 
 
+def is_comwechat_instance(instance):
+    """检测是否为ComWeChat实例"""
+    return str(instance) == 'ComWeChat'
+
+
 async def send_by_index(index: int, weibo: WeiboUser, data: MessageStructure):
     result = await weibo.get_weibo_content(index - 1)
 
@@ -50,8 +56,21 @@ async def send_by_index(index: int, weibo: WeiboUser, data: MessageStructure):
             Chain(data)
             .text(result.user_name + '\n')
             .text(html.unescape(result.html_text) + '\n')
-            .image(result.pics_list)
         )
+        
+        # 发送普通图片
+        if result.pics_list:
+            chain.image(result.pics_list)
+        
+        # 检测是否为ComWeChat实例并发送GIF
+        if is_comwechat_instance(data.instance):
+            # ComWeChat：使用Face元素发送GIF（会被转换为wx.emoji）
+            for gif_path in result.gif_list:
+                chain.face(gif_path)  # 使用face方法，传递文件路径
+        else:
+            # 其他平台：普通图片方式发送GIF
+            if result.gif_list:
+                chain.image(result.gif_list)
 
         if not isinstance(data.instance, QQGuildBotInstance):
             chain.text(f'\n\n{result.detail_url}')
@@ -236,12 +255,35 @@ async def _(_):
 
             if isinstance(instance.instance, QQGuildBotInstance):
                 if not instance.instance.private:
+                    # QQ频道公域，发送图片URL
                     for url in result.pics_urls:
                         data.image(url=url)
+                    # GIF以图片URL形式发送
+                    for url in result.gif_urls:
+                        data.image(url=url)
                 else:
+                    # QQ频道私域，发送本地图片文件
+                    if result.pics_list:
+                        data.image(result.pics_list)
+                    # GIF以图片文件形式发送
+                    if result.gif_list:
+                        data.image(result.gif_list)
+            elif is_comwechat_instance(instance.instance):
+                # ComWeChat平台
+                if result.pics_list:
                     data.image(result.pics_list)
+                # GIF使用Face元素发送（会被转换为wx.emoji）
+                for gif_path in result.gif_list:
+                    data.face(gif_path)
+                data.text(f'\n\n{result.detail_url}')
             else:
-                data.image(result.pics_list).text(f'\n\n{result.detail_url}')
+                # 普通群聊，发送本地图片文件
+                if result.pics_list:
+                    data.image(result.pics_list)
+                # GIF以图片文件形式发送
+                if result.gif_list:
+                    data.image(result.gif_list)
+                data.text(f'\n\n{result.detail_url}')
 
             if bot.get_config('sendAsync'):
                 async_send_tasks.append(instance.send_message(data, channel_id=item.group_id))

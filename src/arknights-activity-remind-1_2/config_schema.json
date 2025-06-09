@@ -1,0 +1,76 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": [],
+    "properties": {
+        "sendTime": {
+            "title": "推送提醒时间",
+            "description": "可在同一天设置多次提醒",
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "foward",
+                    "time",
+                    "remindType"
+                ],
+                "properties": {
+                    "foward": {
+                        "title": "提前几天提醒",
+                        "description": "在活动开始/结束前几天进行提醒，最大为10天,最小为0天",
+                        "type":"integer",
+                        "maximum": 10,
+                        "minimum": 0
+                    },
+                    "time": {
+                        "title": "推送时间",
+                        "description": "精确到分钟",
+                        "type": "string",
+                        "format": "time"
+                    },
+                    "remindType": {
+                        "title": "提醒方式",
+                        "description": "@所有人可能需要管理员权限，且可能有每日次数限制",
+                        "type": "string",
+                        "enum": [
+                            "@所有人",
+                            "连发三遍",
+                            "普通"
+                        ],
+                        "default":"普通"
+                    }
+                }
+            }
+        },
+        "sendAsync": {
+            "title": "是否同时推送",
+            "description": "同时向所有群推送，否则排队推送。",
+            "type": "boolean",
+            "default": false
+        },
+        "sendInterval": {
+            "title": "推送间隔",
+            "description": "如果不是同时推送，每隔一定时间向下一个群推送",
+            "type": "number",
+            "default": 0.2
+        },
+        "sendRealtimeRemind": {
+            "title": "实时提醒",
+            "description": "部分活动开始时实时提醒。",
+            "type": "boolean",
+            "default": true
+        },
+        "sendGachaPoolRemind": {
+            "title": "卡池结束提醒",
+            "description": "只提醒限时寻访卡池，不包括联合行动及前路回响卡池。同时影响活动列表中是否包含卡池开始结束时间",
+            "type": "boolean",
+            "default": true
+        },
+        "sendTowerSeasonRemind": {
+            "title": "保全派驻派驻周期提醒",
+            "description": "注意非资源获取周期",
+            "type": "boolean",
+            "default": true
+        }
+    }
+}

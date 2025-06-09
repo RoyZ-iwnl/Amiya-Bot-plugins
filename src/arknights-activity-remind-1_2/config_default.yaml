@@ -1,0 +1,25 @@
+sendTime:
+    -   foward: 2
+        time: "9:00:00"
+        remindType: "普通"
+    -   foward: 2
+        time: "19:00:00"
+        remindType: "普通"
+    -   foward: 1
+        time: "9:00:00"
+        remindType: "普通"
+    -   foward: 1
+        time: "19:00:00"
+        remindType: "@所有人"
+    -   foward: 0
+        time: "9:00:00"
+        remindType: "@所有人"
+    -   foward: 0
+        time: "19:00:00"
+        remindType: "@所有人"
+
+sendAsync: false
+sendInterval: 0.2
+sendRealtimeRemind: true
+sendGachaPoolRemind: true
+sendTowerSeasonRemind: true

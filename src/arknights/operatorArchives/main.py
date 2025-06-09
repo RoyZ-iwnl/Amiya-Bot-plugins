@@ -154,7 +154,7 @@ async def operator_archives_story_func(data: Message):
     index = get_index(data.text_digits, stories)
 
     if not info.story_key and index is None:
-        text = f'博士，这是干员{opt.name}的档案列表\n回复【<span style="color: red">序号</span>】查询对应的档案资料\n\n'
+        text = f'博士，这是干员{opt.name}的档案列表\n回复【<span style="color: red">序号</span>】查询对应的档案资料\n回复【<span style="color: red">ALL</span>】获取所有档案资料\n\n'
         text += '|标题|标题|标题|\n|----|----|----|\n'
 
         for i, item in enumerate(stories):
@@ -167,7 +167,18 @@ async def operator_archives_story_func(data: Message):
 
         wait = await data.wait(Chain(data).markdown(text))
         if wait:
-            index = get_index(wait.text_digits, stories)
+            # 检查用户是否回复了"ALL"
+            if wait.text.upper() == 'ALL':
+                # 发送所有档案资料
+                all_stories_text = f'博士，这是干员{opt.name}的所有档案资料：\n\n'
+                for i, story in enumerate(stories):
+                    all_stories_text += f'【{story["story_title"]}】\n'
+                    all_stories_text += story["story_text"].replace('\n', '<br>') + '\n\n'
+                    all_stories_text += '---\n\n'  # 分隔线
+                
+                return Chain(data).markdown(all_stories_text)
+            else:
+                index = get_index(wait.text_digits, stories)
 
     if index is not None:
         info.story_key = info.story_key or stories[index]['story_title']
@@ -183,6 +194,7 @@ async def operator_archives_story_func(data: Message):
         )
     else:
         return Chain(data).text(f'博士，没有找到干员{info.name}《{info.story_key}》的档案')
+
 
 
 @bot.on_message(group_id='operator', keywords=['皮肤', '立绘'], level=default_level)
@@ -247,7 +259,7 @@ async def operator_archives_skill_and_material_func(data: Message):
             return None
         info.name = wait.text
 
-    if '材料' in data.text:
+    if '养成材料' in data.text:
         if info.char and info.char.rarity <= 2:
             return Chain(data).text(f'博士，干员{info.name}不需要消耗材料进行升级哦~')
 

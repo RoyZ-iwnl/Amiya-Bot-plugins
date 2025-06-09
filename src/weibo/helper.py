@@ -23,6 +23,8 @@ class WeiboContent:
     detail_url: str = ''
     pics_list: list = field(default_factory=list)
     pics_urls: list = field(default_factory=list)
+    gif_list: list = field(default_factory=list)  # GIF文件列表
+    gif_urls: list = field(default_factory=list)   # GIF URL列表
 
 
 class WeiboUser:
@@ -156,18 +158,31 @@ class WeiboUser:
             name = pic_url.split('/')[-1]
             suffix = name.split('.')[-1]
 
-            if suffix.lower() == 'gif' and not self.setting.sendGIF:
-                continue
+            # 区分GIF和普通图片
+            if suffix.lower() == 'gif':
+                if not self.setting.sendGIF:
+                    continue
+                
+                path = f'{self.setting.imagesCache}/{name}'
+                create_dir(path, is_file=True)
 
-            path = f'{self.setting.imagesCache}/{name}'
-            create_dir(path, is_file=True)
+                if not os.path.exists(path):
+                    stream = await download_async(pic_url, headers=self.headers)
+                    if stream:
+                        open(path, 'wb').write(stream)
 
-            if not os.path.exists(path):
-                stream = await download_async(pic_url, headers=self.headers)
-                if stream:
-                    open(path, 'wb').write(stream)
+                content.gif_list.append(path)
+                content.gif_urls.append(pic_url)
+            else:
+                path = f'{self.setting.imagesCache}/{name}'
+                create_dir(path, is_file=True)
 
-            content.pics_list.append(path)
-            content.pics_urls.append(pic_url)
+                if not os.path.exists(path):
+                    stream = await download_async(pic_url, headers=self.headers)
+                    if stream:
+                        open(path, 'wb').write(stream)
+
+                content.pics_list.append(path)
+                content.pics_urls.append(pic_url)
 
         return content
