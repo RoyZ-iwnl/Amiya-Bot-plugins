@@ -2,6 +2,7 @@ import random
 
 from amiyabot.adapters.mirai import MiraiBotInstance
 from amiyabot.adapters.cqhttp import CQHttpBotInstance
+from amiyabot.adapters.comwechat import ComWeChatBotInstance
 
 from core import Event
 from core.util import any_match
@@ -213,23 +214,86 @@ async def _(data: Message):
         PokeLock.create(group_id=data.channel_id)
         return '已关闭戳一戳'
 
-
+# mirai 适配器戳一戳处理
 @bot.on_event('NudgeEvent')
 async def _(event: Event, instance: MiraiBotInstance):
-    if str(event.data['target']) == instance.appid and PokeLock.get_or_none(group_id=event.data['target']):
+    if (str(event.data['target']) == instance.appid and 
+        not PokeLock.get_or_none(group_id=event.data['subject']['id'])):
+        
         if random.randint(0, 10) >= 6:
-            await instance.api.send_nudge(event.data['fromId'], event.data['subject']['id'])
+            await instance.api.send_nudge(
+                event.data['fromId'], 
+                event.data['subject']['id']
+            )
         else:
-            await instance.send_message(await echo(), event.data['fromId'], event.data['subject']['id'])
+            await instance.send_message(
+                await echo(), 
+                event.data['fromId'], 
+                event.data['subject']['id']
+            )
 
-
+# cqhttp 适配器戳一戳处理
 @bot.on_event('notice.notify.poke')
 async def _(event: Event, instance: CQHttpBotInstance):
-    if str(event.data['target_id']) == instance.appid and PokeLock.get_or_none(group_id=event.data['target_id']):
+    if (str(event.data['target_id']) == instance.appid and 
+        not PokeLock.get_or_none(group_id=event.data['group_id'])):
+        
         if random.randint(0, 10) >= 6:
-            await instance.api.send_nudge(event.data['user_id'], event.data['group_id'])
+            await instance.api.send_nudge(
+                event.data['user_id'], 
+                event.data['group_id']
+            )
         else:
-            await instance.send_message(await echo(), event.data['user_id'], event.data['group_id'])
+            await instance.send_message(
+                await echo(), 
+                event.data['user_id'], 
+                event.data['group_id']
+            )
+
+# comwechat 适配器戳一戳处理
+@bot.on_event('notice.wx.get_group_poke')
+async def _(event: Event, instance: ComWeChatBotInstance):
+    #print("\n[戳一戳调试] ===== 收到 comwechat 戳一戳事件 =====")
+    #print(f"[戳一戳调试] 原始事件数据: {event.data}")
+
+    target_user_id = event.data.get('user_id')
+    # 使用事件数据中的真实机器人微信ID，而不是 instance.appid
+    bot_id = event.data.get('self', {}).get('user_id')
+    is_bot_poked = str(target_user_id) == str(bot_id)
+
+    group_id = event.data.get('group_id')
+    lock = PokeLock.get_or_none(group_id=group_id)
+    is_locked = lock is not None
+
+    #print(f"[戳一戳调试] 群组ID(group_id): {group_id}")
+    #print(f"[戳一戳调试] 检查是否戳机器人: {is_bot_poked} (目标ID: {target_user_id}, 机器人真实ID: {bot_id})")
+    #print(f"[戳一戳调试] 检查该群功能是否已关闭: {is_locked}")
+
+    # 正确逻辑：当功能未被锁定时（not is_locked）
+    if is_bot_poked and not is_locked:
+        print("[戳一戳调试] ✅ 条件满足，准备执行回复操作。")
+        if random.randint(0, 10) >= 6:
+            print("[戳一戳调试] 准备发送随机消息...")
+            await instance.send_message(
+                await echo(),
+                event.data['from_user_id'],
+                event.data['group_id']
+            )
+        else:
+            print("[戳一戳调试] 准备发送固定文本消息...")
+            await instance.send_message(
+                await echo(),
+                event.data['from_user_id'],
+                event.data['group_id']
+            )
+    else:
+        print("[戳一戳调试] ❌ 条件不满足，忽略本次事件。")
+        if not is_bot_poked:
+            print(f"[戳一戳调试] 原因：不是戳机器人 (目标: {target_user_id}, 机器人: {bot_id})")
+        if is_locked:
+            print(f"[戳一戳调试] 原因：该群戳一戳功能已关闭")
+    print("[戳一戳调试] ================= 事件处理结束 =================\n")
+
 
 
 @bot.message_created
