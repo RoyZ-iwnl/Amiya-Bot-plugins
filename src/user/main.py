@@ -24,20 +24,20 @@ baidu = BaiduCloud(read_yaml(config_path))
 def is_comwechat_instance(instance):
     """检测是否为ComWeChat实例"""
     instance_str = str(instance)
-    print(f"[昵称调试] 实例类型检测: {instance_str}")
+    #print(f"\n[昵称调试] 实例类型检测: {instance_str}")
     return instance_str == 'ComWeChat'
 
 async def get_user_nickname(data: Message):
     """获取用户昵称，兼容comwechat实例"""
-    print(f"[昵称调试] 开始获取昵称，用户ID: {data.user_id}, 群组ID: {data.channel_id}")
-    print(f"[昵称调试] 原始nickname值: {getattr(data, 'nickname', '无nickname属性')}")
+    #print(f"\n[昵称调试] 开始获取昵称，用户ID: {data.user_id}, 群组ID: {data.channel_id}")
+    #print(f"\n[昵称调试] 原始nickname值: {getattr(data, 'nickname', '无nickname属性')}")
     
     # 检查是否为comwechat实例
     if is_comwechat_instance(data.instance):
-        print(f"[昵称调试] ✅ 检测到ComWeChat实例")
+        #print(f"\n[昵称调试] ✅ 检测到ComWeChat实例")
         
         try:
-            print(f"[昵称调试] 准备调用API获取昵称...")
+            #print(f"\n[昵称调试] 准备调用API获取昵称...")
             # 使用comwechat接口获取群成员昵称
             res = await data.instance.api.post(
                 '/',
@@ -50,52 +50,51 @@ async def get_user_nickname(data: Message):
                 },
             )
             
-            print(f"[昵称调试] API响应: {res}")
-            print(f"[昵称调试] API响应类型: {type(res)}")
-            
-            # 修复：处理amiyabot.network.httpRequests.Response对象
+            #print(f"\n[昵称调试] API响应: {res}")
+            #print(f"\n[昵称调试] API响应类型: {type(res)}")
+        
             try:
                 # 尝试多种方法获取JSON数据
                 if hasattr(res, 'json') and callable(res.json):
                     json_data = res.json()
-                    print(f"[昵称调试] 使用.json()方法获取数据")
+                    #print(f"\n[昵称调试] 使用.json()方法获取数据")
                 elif hasattr(res, 'data'):
                     json_data = res.data
-                    print(f"[昵称调试] 使用.data属性获取数据")
+                    #print(f"\n[昵称调试] 使用.data属性获取数据")
                 elif hasattr(res, 'text'):
                     # 如果有text属性，尝试解析JSON
                     import json
                     json_data = json.loads(res.text)
-                    print(f"[昵称调试] 使用.text属性并解析JSON获取数据")
+                    #print(f"\n[昵称调试] 使用.text属性并解析JSON获取数据")
                 else:
                     # 最后尝试直接使用字符串表示
                     import json
                     json_data = json.loads(str(res))
-                    print(f"[昵称调试] 使用str()并解析JSON获取数据")
+                    #print(f"\n[昵称调试] 使用str()并解析JSON获取数据")
                 
-                print(f"[昵称调试] 解析后的JSON数据: {json_data}")
-                print(f"[昵称调试] JSON数据类型: {type(json_data)}")
+                #print(f"\n[昵称调试] 解析后的JSON数据: {json_data}")
+                #print(f"\n[昵称调试] JSON数据类型: {type(json_data)}")
                 
             except Exception as parse_error:
-                print(f"[昵称调试] ❌ JSON解析失败: {parse_error}")
+                #print(f"\n[昵称调试] ❌ JSON解析失败: {parse_error}")
                 return '用户'
             
             # 检查响应状态并返回昵称
             if isinstance(json_data, dict) and json_data.get('status') == 'ok' and json_data.get('retcode') == 0:
                 nickname = json_data.get('data', '用户')
-                print(f"[昵称调试] ✅ 成功获取昵称: {nickname}")
+                #print(f"\n[昵称调试] ✅ 成功获取昵称: {nickname}")
                 return nickname
             else:
-                print(f"[昵称调试] ❌ API返回错误: status={json_data.get('status') if isinstance(json_data, dict) else 'unknown'}")
+                #print(f"\n[昵称调试] ❌ API返回错误: status={json_data.get('status') if isinstance(json_data, dict) else 'unknown'}")
                 return '用户'
                 
         except Exception as e:
-            print(f"[昵称调试] ❌ 获取comwechat昵称异常: {e}")
+            #print(f"\n[昵称调试] ❌ 获取comwechat昵称异常: {e}")
             import traceback
             traceback.print_exc()
             return '用户'
     else:
-        print(f"[昵称调试] 非ComWeChat实例，使用原始nickname")
+        #print(f"\n[昵称调试] 非ComWeChat实例，使用原始nickname")
         # 非comwechat实例，使用原来的nickname
         return getattr(data, 'nickname', '用户')
 
@@ -376,36 +375,36 @@ async def _(event: Event, instance: ComWeChatBotInstance):
 
 @bot.message_created
 async def _(data: Message, _):
-    print(f"\n[昵称调试] ===== message_created钩子被触发 =====")
-    print(f"[昵称调试] 消息内容: {data.text}")
-    print(f"[昵称调试] 用户ID: {data.user_id}")
-    print(f"[昵称调试] 群组ID: {data.channel_id}")
-    print(f"[昵称调试] 实例类型: {type(data.instance).__name__}")
+    #print(f"\n[昵称调试] ===== message_created钩子被触发 =====")
+    #print(f"\n[昵称调试] 消息内容: {data.text}")
+    #print(f"\n[昵称调试] 用户ID: {data.user_id}")
+    #print(f"\n[昵称调试] 群组ID: {data.channel_id}")
+    #print(f"\n[昵称调试] 实例类型: {type(data.instance).__name__}")
     
     # 先处理comwechat实例的nickname获取
     if is_comwechat_instance(data.instance):
-        print(f"[昵称调试] ComWeChat实例，开始处理nickname...")
+        #print(f"\n[昵称调试] ComWeChat实例，开始处理nickname...")
         original_nickname = getattr(data, 'nickname', None)
-        print(f"[昵称调试] 处理前nickname: {original_nickname}")
+        #print(f"\n[昵称调试] 处理前nickname: {original_nickname}")
         
         # 获取真实昵称
         real_nickname = await get_user_nickname(data)
         data.nickname = real_nickname
-        print(f"[昵称调试] 设置后nickname: {data.nickname}")
+        #print(f"\n[昵称调试] 设置后nickname: {data.nickname}")
     else:
-        print(f"[昵称调试] 非ComWeChat实例，跳过nickname处理")
+        #print(f"\n[昵称调试] 非ComWeChat实例，跳过nickname处理")
     
     # 然后处理自定义昵称（保持原有逻辑）
     custom_nickname = UserCustom.get_nickname(data.user_id)
     if custom_nickname:
-        print(f"[昵称调试] 发现自定义昵称: {custom_nickname}")
+        #print(f"\n[昵称调试] 发现自定义昵称: {custom_nickname}")
         data.nickname = custom_nickname
-        print(f"[昵称调试] 最终nickname: {data.nickname}")
+        #print(f"\n[昵称调试] 最终nickname: {data.nickname}")
     else:
-        print(f"[昵称调试] 无自定义昵称")
+        #print(f"\n[昵称调试] 无自定义昵称")
     
-    print(f"[昵称调试] 最终结果 - nickname: {data.nickname}")
-    print(f"[昵称调试] ===== message_created钩子处理完成 =====\n")
+    #print(f"\n[昵称调试] 最终结果 - nickname: {data.nickname}")
+    #print(f"\n[昵称调试] ===== message_created钩子处理完成 =====\n")
     
     return data
 

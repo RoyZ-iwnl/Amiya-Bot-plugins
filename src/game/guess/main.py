@@ -1,8 +1,12 @@
+import json
+import logging
 from core import AmiyaBotPluginInstance, Requirement
 from core.util import TimeRecorder
 from core.database.user import UserInfo
 
 from .guessStart import *
+
+logger = logging.getLogger('ComWeChatNickname')
 
 bot = AmiyaBotPluginInstance(
     name='兔兔猜干员',
@@ -16,8 +20,105 @@ bot = AmiyaBotPluginInstance(
     requirements=[Requirement('amiyabot-arknights-gamedata', official=True)],
 )
 
+def is_comwechat_instance(instance):
+    """
+    检测是否为ComWeChat实例
+    
+    Args:
+        instance: 机器人实例
+        
+    Returns:
+        bool: 如果是ComWeChat实例返回True，否则返回False
+    """
+    try:
+        return str(instance) == 'ComWeChat'
+    except Exception as e:
+        logger.error(f"检测ComWeChat实例时出错: {e}")
+        return False
 
-def get_markdown_template_id(data: Message):
+async def get_comwechat_nickname(data):
+    """
+    异步获取ComWeChat群成员真实昵称
+    
+    Args:
+        data: 消息数据对象
+        
+    Returns:
+        str: 获取到的昵称，失败时返回'用户'
+    """
+    try:
+        # 检查是否为ComWeChat实例
+        if not is_comwechat_instance(data.instance):
+            logger.debug("非ComWeChat实例，跳过昵称获取")
+            return '用户'
+        
+        # 调用ComWeChat API获取群成员昵称
+        logger.debug(f"正在获取用户 {data.user_id} 在群 {data.channel_id} 的昵称")
+        
+        response = await data.instance.api('wx.get_groupmember_nickname', {
+            'group_id': data.channel_id,
+            'user_id': data.user_id
+        })
+        
+        # 处理响应
+        if hasattr(response, 'text'):
+            response_data = json.loads(response.text)
+            logger.debug(f"API响应: {response_data}")
+            
+            # 验证返回状态
+            if (response_data.get('status') == 'ok' and 
+                response_data.get('retcode') == 0):
+                
+                nickname = response_data.get('data', {}).get('nickname', '用户')
+                logger.info(f"成功获取用户昵称: {nickname}")
+                return nickname
+            else:
+                logger.warning(f"API返回状态异常: {response_data}")
+                return '用户'
+        else:
+            logger.warning("API响应格式异常，无.text属性")
+            return '用户'
+            
+    except json.JSONDecodeError as e:
+        logger.error(f"解析API响应JSON时出错: {e}")
+        return '用户'
+    except Exception as e:
+        logger.error(f"获取ComWeChat昵称时出现异常: {e}")
+        return '用户'
+
+@bot.message_created
+async def handle_nickname_update(data):
+    """
+    消息创建时的钩子函数，用于更新ComWeChat用户昵称
+    
+    Args:
+        data: 消息数据对象
+    """
+    try:
+        # 检测是否为ComWeChat实例
+        if is_comwechat_instance(data.instance):
+            logger.debug(f"检测到ComWeChat实例，开始获取用户昵称")
+            
+            # 获取真实昵称
+            real_nickname = await get_comwechat_nickname(data)
+            
+            # 如果成功获取到昵称且不是默认值，则更新data.nickname
+            if real_nickname and real_nickname != '用户':
+                original_nickname = data.nickname
+                data.nickname = real_nickname
+                logger.info(f"昵称更新: {original_nickname} -> {real_nickname}")
+            else:
+                logger.debug("未获取到有效昵称，保持原昵称")
+        
+        # 保持原有自定义昵称逻辑不变
+        # 这里可以添加其他自定义昵称处理逻辑
+        
+    except Exception as e:
+        logger.error(f"处理昵称更新时出现异常: {e}")
+
+
+def get_markdown_template_id(data):
+    """获取Markdown模板ID"""
     markdown_template_id: list = bot.get_config('markdown_template_id')
     for item in markdown_template_id:
         if item['bot_id'] == data.instance.appid:
@@ -26,7 +127,8 @@ def get_markdown_template_id(data: Message):
 
 
 @bot.on_message(keywords=['猜干员'])
-async def _(data: Message):
+async def _(data):
+    """猜干员游戏主函数"""
     level = {
         '初级': '立绘',
         '中级': '技能',
