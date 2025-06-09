@@ -21,6 +21,42 @@ if not os.path.exists(config_path):
 baidu = BaiduCloud(read_yaml(config_path))
 
 
+def is_comwechat_instance(instance):
+    """检测是否为ComWeChat实例"""
+    return str(instance) == 'ComWeChat'
+
+async def get_user_nickname(data: Message):
+    """获取用户昵称，兼容comwechat实例"""
+    # 检查是否为comwechat实例且没有nickname
+    if is_comwechat_instance(data.instance):
+        try:
+            # 使用comwechat接口获取群成员昵称
+            res = await data.instance.api.post(
+                '/',
+                {
+                    'action': 'wx.get_groupmember_nickname',
+                    'params': {
+                        'group_id': data.group_id,
+                        'user_id': data.user_id
+                    },
+                },
+            )
+            
+            # 检查响应状态并返回昵称
+            if res.get('status') == 'ok' and res.get('retcode') == 0:
+                return res.get('data', '用户')
+            else:
+                # 如果获取失败，返回默认值
+                return '用户'
+        except Exception as e:
+            # 异常处理，返回默认值
+            print(f"获取comwechat昵称失败: {e}")
+            return '用户'
+    else:
+        # 非comwechat实例或已有nickname，使用原来的nickname
+        return getattr(data, 'nickname', '用户')
+
+
 @table
 class PokeLock(UserBaseModel):
     group_id: str = CharField()
@@ -298,6 +334,11 @@ async def _(event: Event, instance: ComWeChatBotInstance):
 
 @bot.message_created
 async def _(data: Message, _):
+    # 先处理comwechat实例的nickname获取
+    if is_comwechat_instance(data.instance) and not hasattr(data, 'nickname'):
+        data.nickname = await get_user_nickname(data)
+    
+    # 然后处理自定义昵称（保持原有逻辑）
     custom_nickname = UserCustom.get_nickname(data.user_id)
     if custom_nickname:
         data.nickname = custom_nickname
