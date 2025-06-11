@@ -21,83 +21,6 @@ if not os.path.exists(config_path):
 baidu = BaiduCloud(read_yaml(config_path))
 
 
-def is_comwechat_instance(instance):
-    """检测是否为ComWeChat实例"""
-    instance_str = str(instance)
-    #print(f"\n[昵称调试] 实例类型检测: {instance_str}")
-    return instance_str == 'ComWeChat'
-
-async def get_user_nickname(data: Message):
-    """获取用户昵称，兼容comwechat实例"""
-    #print(f"\n[昵称调试] 开始获取昵称，用户ID: {data.user_id}, 群组ID: {data.channel_id}")
-    #print(f"\n[昵称调试] 原始nickname值: {getattr(data, 'nickname', '无nickname属性')}")
-    
-    # 检查是否为comwechat实例
-    if is_comwechat_instance(data.instance):
-        #print(f"\n[昵称调试] ✅ 检测到ComWeChat实例")
-        
-        try:
-            #print(f"\n[昵称调试] 准备调用API获取昵称...")
-            # 使用comwechat接口获取群成员昵称
-            res = await data.instance.api.post(
-                '/',
-                {
-                    'action': 'wx.get_groupmember_nickname',
-                    'params': {
-                        'group_id': data.channel_id,  # 使用channel_id
-                        'user_id': data.user_id
-                    },
-                },
-            )
-            
-            #print(f"\n[昵称调试] API响应: {res}")
-            #print(f"\n[昵称调试] API响应类型: {type(res)}")
-        
-            try:
-                # 尝试多种方法获取JSON数据
-                if hasattr(res, 'json') and callable(res.json):
-                    json_data = res.json()
-                    #print(f"\n[昵称调试] 使用.json()方法获取数据")
-                elif hasattr(res, 'data'):
-                    json_data = res.data
-                    #print(f"\n[昵称调试] 使用.data属性获取数据")
-                elif hasattr(res, 'text'):
-                    # 如果有text属性，尝试解析JSON
-                    import json
-                    json_data = json.loads(res.text)
-                    #print(f"\n[昵称调试] 使用.text属性并解析JSON获取数据")
-                else:
-                    # 最后尝试直接使用字符串表示
-                    import json
-                    json_data = json.loads(str(res))
-                    #print(f"\n[昵称调试] 使用str()并解析JSON获取数据")
-                
-                #print(f"\n[昵称调试] 解析后的JSON数据: {json_data}")
-                #print(f"\n[昵称调试] JSON数据类型: {type(json_data)}")
-                
-            except Exception as parse_error:
-                #print(f"\n[昵称调试] ❌ JSON解析失败: {parse_error}")
-                return '用户'
-            
-            # 检查响应状态并返回昵称
-            if isinstance(json_data, dict) and json_data.get('status') == 'ok' and json_data.get('retcode') == 0:
-                nickname = json_data.get('data', '用户')
-                #print(f"\n[昵称调试] ✅ 成功获取昵称: {nickname}")
-                return nickname
-            else:
-                #print(f"\n[昵称调试] ❌ API返回错误: status={json_data.get('status') if isinstance(json_data, dict) else 'unknown'}")
-                return '用户'
-                
-        except Exception as e:
-            #print(f"\n[昵称调试] ❌ 获取comwechat昵称异常: {e}")
-            import traceback
-            traceback.print_exc()
-            return '用户'
-    else:
-        #print(f"\n[昵称调试] 非ComWeChat实例，使用原始nickname")
-        # 非comwechat实例，使用原来的nickname
-        return getattr(data, 'nickname', '用户')
-
 @table
 class PokeLock(UserBaseModel):
     group_id: str = CharField()
@@ -291,39 +214,38 @@ async def _(data: Message):
         PokeLock.create(group_id=data.channel_id)
         return '已关闭戳一戳'
 
-# mirai 适配器戳一戳处理
+
+# mirai 适配器戳一戳处理（修正版）
 @bot.on_event('NudgeEvent')
 async def _(event: Event, instance: MiraiBotInstance):
-    if (str(event.data['target']) == instance.appid and 
+    if (str(event.data['target']) == instance.appid and
         not PokeLock.get_or_none(group_id=event.data['subject']['id'])):
-        
         if random.randint(0, 10) >= 6:
             await instance.api.send_nudge(
-                event.data['fromId'], 
+                event.data['fromId'],
                 event.data['subject']['id']
             )
         else:
             await instance.send_message(
-                await echo(), 
-                event.data['fromId'], 
+                await echo(),
+                event.data['fromId'],
                 event.data['subject']['id']
             )
 
-# cqhttp 适配器戳一戳处理
+# cqhttp 适配器戳一戳处理（修正版）
 @bot.on_event('notice.notify.poke')
 async def _(event: Event, instance: CQHttpBotInstance):
-    if (str(event.data['target_id']) == instance.appid and 
+    if (str(event.data['target_id']) == instance.appid and
         not PokeLock.get_or_none(group_id=event.data['group_id'])):
-        
         if random.randint(0, 10) >= 6:
             await instance.api.send_nudge(
-                event.data['user_id'], 
+                event.data['user_id'],
                 event.data['group_id']
             )
         else:
             await instance.send_message(
-                await echo(), 
-                event.data['user_id'], 
+                await echo(),
+                event.data['user_id'],
                 event.data['group_id']
             )
 
@@ -332,20 +254,19 @@ async def _(event: Event, instance: CQHttpBotInstance):
 async def _(event: Event, instance: ComWeChatBotInstance):
     #print("\n[戳一戳调试] ===== 收到 comwechat 戳一戳事件 =====")
     #print(f"[戳一戳调试] 原始事件数据: {event.data}")
-
+    
     target_user_id = event.data.get('user_id')
     # 使用事件数据中的真实机器人微信ID，而不是 instance.appid
     bot_id = event.data.get('self', {}).get('user_id')
     is_bot_poked = str(target_user_id) == str(bot_id)
-
     group_id = event.data.get('group_id')
     lock = PokeLock.get_or_none(group_id=group_id)
     is_locked = lock is not None
-
+    
     #print(f"[戳一戳调试] 群组ID(group_id): {group_id}")
     #print(f"[戳一戳调试] 检查是否戳机器人: {is_bot_poked} (目标ID: {target_user_id}, 机器人真实ID: {bot_id})")
     #print(f"[戳一戳调试] 检查该群功能是否已关闭: {is_locked}")
-
+    
     # 正确逻辑：当功能未被锁定时（not is_locked）
     if is_bot_poked and not is_locked:
         print("[戳一戳调试] ✅ 条件满足，准备执行回复操作。")
@@ -369,43 +290,17 @@ async def _(event: Event, instance: ComWeChatBotInstance):
             print(f"[戳一戳调试] 原因：不是戳机器人 (目标: {target_user_id}, 机器人: {bot_id})")
         if is_locked:
             print(f"[戳一戳调试] 原因：该群戳一戳功能已关闭")
+    
     print("[戳一戳调试] ================= 事件处理结束 =================\n")
 
 
 
 @bot.message_created
 async def _(data: Message, _):
-    #print(f"\n[昵称调试] ===== message_created钩子被触发 =====")
-    #print(f"\n[昵称调试] 消息内容: {data.text}")
-    #print(f"\n[昵称调试] 用户ID: {data.user_id}")
-    #print(f"\n[昵称调试] 群组ID: {data.channel_id}")
-    #print(f"\n[昵称调试] 实例类型: {type(data.instance).__name__}")
-    
-    # 先处理comwechat实例的nickname获取
-    if is_comwechat_instance(data.instance):
-        #print(f"\n[昵称调试] ComWeChat实例，开始处理nickname...")
-        original_nickname = getattr(data, 'nickname', None)
-        #print(f"\n[昵称调试] 处理前nickname: {original_nickname}")
-        
-        # 获取真实昵称
-        real_nickname = await get_user_nickname(data)
-        data.nickname = real_nickname
-        #print(f"\n[昵称调试] 设置后nickname: {data.nickname}")
-    else:
-        #print(f"\n[昵称调试] 非ComWeChat实例，跳过nickname处理")
-    
-    # 然后处理自定义昵称（保持原有逻辑）
     custom_nickname = UserCustom.get_nickname(data.user_id)
     if custom_nickname:
-        #print(f"\n[昵称调试] 发现自定义昵称: {custom_nickname}")
         data.nickname = custom_nickname
-        #print(f"\n[昵称调试] 最终nickname: {data.nickname}")
-    else:
-        #print(f"\n[昵称调试] 无自定义昵称")
-    
-    #print(f"\n[昵称调试] 最终结果 - nickname: {data.nickname}")
-    #print(f"\n[昵称调试] ===== message_created钩子处理完成 =====\n")
-    
+
     return data
 
 
