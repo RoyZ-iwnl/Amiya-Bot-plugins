@@ -4,6 +4,8 @@ import time
 import asyncio
 import re
 
+from PIL import Image, ImageSequence
+
 from amiyabot import QQGuildBotInstance
 from amiyabot.builtin.message import MessageStructure
 from amiyabot.adapters.tencent.qqGroup import QQGroupBotInstance
@@ -46,6 +48,105 @@ def is_comwechat_instance(instance):
     return str(instance) == 'ComWeChat'
 
 
+async def compress_gif_for_wechat(gif_path: str, cache_dir: str) -> str:
+    """
+    为适配微信的限制而压缩GIF。
+    - 检查GIF的宽度是否超过1000px。
+    - 检查GIF的文件大小是否超过10MB。
+    - 如果任一条件满足，则进行压缩，直到满足所有条件。
+    - 返回压缩后或原始的图片路径。
+    """
+    MAX_WIDTH = 1000  # 微信最大宽度限制
+    MAX_SIZE_BYTES = 10 * 1024 * 1024  # 微信最大文件大小限制 (10MB)
+
+    try:
+        # 检查原始文件是否存在
+        if not os.path.exists(gif_path):
+            return gif_path
+
+        file_size = os.path.getsize(gif_path)
+        img = Image.open(gif_path)
+        width, _ = img.size
+
+        # 如果文件符合要求，直接返回原路径
+        if width <= MAX_WIDTH and file_size <= MAX_SIZE_BYTES:
+            img.close()
+            return gif_path
+
+        print(f"[微博插件] 检测到GIF需要压缩: {os.path.basename(gif_path)}, 原始尺寸: {width}px, 大小: {file_size / 1024 / 1024:.2f}MB")
+
+        # 准备压缩后文件的保存路径
+        base_name = os.path.basename(gif_path)
+        compressed_path = os.path.join(cache_dir, f"compressed_{base_name}")
+
+        scale = 1.0
+        # 如果宽度超出限制，首先计算缩放比例
+        if width > MAX_WIDTH:
+            scale = MAX_WIDTH / width
+
+        # 循环压缩，直到文件大小符合要求
+        while True:
+            new_width = int(img.width * scale)
+            new_height = int(img.height * scale)
+
+            # 提取并缩放每一帧
+            frames = []
+            # 兼容不同版本的Pillow库
+            try:
+                from PIL.Image import Resampling
+                resample_method = Resampling.LANCZOS
+            except ImportError:
+                resample_method = Image.ANTIALIAS
+
+            for frame in ImageSequence.Iterator(img):
+                resized_frame = frame.convert("RGBA").resize((new_width, new_height), resample_method)
+                frames.append(resized_frame)
+            
+            if not frames:
+                img.close()
+                return gif_path
+
+            # 获取原始GIF的播放信息
+            duration = img.info.get('duration', 100)
+            loop = img.info.get('loop', 0)
+
+            # 将压缩后的帧保存到一个临时文件，用于检查大小
+            temp_path = compressed_path + ".tmp"
+            frames[0].save(
+                temp_path,
+                save_all=True,
+                append_images=frames[1:],
+                duration=duration,
+                loop=loop,
+                optimize=True,  # 开启优化以减小文件大小
+            )
+
+            # 检查临时文件大小
+            if os.path.getsize(temp_path) <= MAX_SIZE_BYTES:
+                # 如果符合要求，重命名为最终文件
+                if os.path.exists(compressed_path):
+                    os.remove(compressed_path)
+                os.rename(temp_path, compressed_path)
+                img.close()
+                print(f"[微博插件] GIF 压缩成功. 新路径: {compressed_path}, 新尺寸: {new_width}px, 大小: {os.path.getsize(compressed_path) / 1024 / 1024:.2f}MB")
+                return compressed_path
+            else:
+                # 如果仍过大，删除临时文件并进一步缩小尺寸
+                os.remove(temp_path)
+
+            scale *= 0.95  # 每次将尺寸缩小5%
+            
+            # 安全检查，防止无限循环或图片缩得太小
+            if new_width < 100:
+                img.close()
+                print(f"[微博插件] 无法将GIF压缩到目标大小, 将尝试发送原图。")
+                return gif_path
+
+    except Exception as e:
+        print(f"[微博插件] 压缩GIF时发生意外错误: {e}")
+        return gif_path  # 发生错误时返回原图路径
+
+
 async def send_by_index(index: int, weibo: WeiboUser, data: MessageStructure):
     result = await weibo.get_weibo_content(index - 1)
 
@@ -64,9 +165,13 @@ async def send_by_index(index: int, weibo: WeiboUser, data: MessageStructure):
         
         # 检测是否为ComWeChat实例并发送GIF
         if is_comwechat_instance(data.instance):
-            # ComWeChat：使用Face元素发送GIF（会被转换为wx.emoji）
-            for gif_path in result.gif_list:
-                chain.face(gif_path)  # 使用face方法，传递文件路径
+            # ComWeChat：使用Face元素发送GIF，并在发送前检查是否需要压缩
+            if result.gif_list:
+                cache_dir = weibo.images_cache_dir # 从weibo实例获取缓存目录
+                for gif_path in result.gif_list:
+                    # 调用压缩函数
+                    compressed_path = await compress_gif_for_wechat(gif_path, cache_dir)
+                    chain.face(compressed_path)  # 使用压缩后的路径发送
         else:
             # 其他平台：普通图片方式发送GIF
             if result.gif_list:
@@ -76,6 +181,7 @@ async def send_by_index(index: int, weibo: WeiboUser, data: MessageStructure):
             chain.text(f'\n\n{result.detail_url}')
 
         return chain
+
 
 
 def get_index_from_text(text: str, array: list):
@@ -272,9 +378,13 @@ async def _(_):
                 # ComWeChat平台
                 if result.pics_list:
                     data.image(result.pics_list)
-                # GIF使用Face元素发送（会被转换为wx.emoji）
-                for gif_path in result.gif_list:
-                    data.face(gif_path)
+                # GIF使用Face元素发送，并在发送前检查是否需要压缩
+                if result.gif_list:
+                    cache_dir = weibo.images_cache_dir # 从weibo实例获取缓存目录
+                    for gif_path in result.gif_list:
+                        # 调用压缩函数
+                        compressed_path = await compress_gif_for_wechat(gif_path, cache_dir)
+                        data.face(compressed_path) # 使用压缩后的路径发送
                 data.text(f'\n\n{result.detail_url}')
             else:
                 # 普通群聊，发送本地图片文件
