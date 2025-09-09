@@ -26,6 +26,24 @@
                     "description": "微博图片缓存的目录，可以为绝对路径",
                     "type": "string",
                     "default": "log/weibo"
+                },
+                "useCeobeAPI": {
+                    "title": "使用CeobeAPI",
+                    "description": "是否使用小刻食堂CeobeAPI获取微博数据",
+                    "type": "boolean",
+                    "default": true
+                },
+                "ceobeAPITimeout": {
+                    "title": "API请求超时",
+                    "description": "CeobeAPI请求超时时间，单位秒",
+                    "type": "integer",
+                    "default": 10
+                },
+                "debugCeobeAPI": {
+                    "title": "调试模式",
+                    "description": "开启CeobeAPI调试输出，显示详细的API调用信息",
+                    "type": "boolean",
+                    "default": false
                 }
             }
         },
@@ -43,14 +61,14 @@
         },
         "listen": {
             "title": "监听列表",
-            "description": "监听的微博ID的列表",
+            "description": "监听的微博ID的列表（支持CeobeAPI和原始微博API）",
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
                     "uid": {
                         "title": "微博 ID",
-                        "description": "一般在微博首页的 url 可以得到：https://weibo.com/u/xxxxxxxxx",
+                        "description": "微博用户ID，支持森空岛、明日方舟、鹰角网络等官方账号",
                         "type": "string"
                     },
                     "name": {

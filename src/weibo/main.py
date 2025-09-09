@@ -284,7 +284,12 @@ async def _(data: Message):
 async def _(_):
     listens: list = bot.get_config('listen')
     for listen in listens:
-        user = listen['uid']
+        user = listen.get('uid', '').strip()
+        
+        # 跳过空的或无效的UID
+        if not user or user == '' or user == 'None':
+            continue
+            
         weibo = WeiboUser(user, attridict(bot.get_config('setting')))
 
         new_id = await weibo.get_weibo_id(0)

@@ -16,3 +16,6 @@ assistant-*
 *.ai.tmp
 *.claude.tmp
 .temp-ai/
+
+src/weibo/claudehelper/*.*
+src/weibo/claudehelper

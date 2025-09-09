@@ -2,8 +2,12 @@ import re
 import os
 import time
 import json
+import uuid
+import asyncio
+import aiohttp
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
+from datetime import datetime
 
 from PIL import Image
 
@@ -14,70 +18,203 @@ from core.util import remove_xml_tag, char_seat, create_dir
 from amiyabot.builtin.lib.browserService import basic_browser_service
 from core import send_to_console_channel, Chain
 
-HEADERS_PATH = os.path.join(os.path.dirname(__file__), "headers.json")
+# CeobeAPI配置
+SERVER_BASE = 'https://server.ceobecanteen.top/api/v1/'
+SERVER_CDN_BASE = 'https://server-cdn.ceobecanteen.top/api/v1/'
+CDN_BASE = 'https://cdn.ceobecanteen.top/'
 
-def get_default_headers(weibo_id: str) -> dict:
+# 调试开关 - 可在配置文件中设置
+DEBUG_CEOBE_API = True  # 可通过setting.debugCeobeAPI控制
+
+# 保持原有的headers.json路径用于兼容性
+#HEADERS_PATH = os.path.join(os.path.dirname(__file__), "headers.json")
+
+def debug_log(message: str, force: bool = False):
+    """调试日志输出 - 只在开启调试时输出"""
+    if DEBUG_CEOBE_API or force:
+        print(f"[CeobeAPI Debug] {message}")
+
+def get_ceobe_headers(client_id: str = None) -> dict:
+    """获取CeobeAPI请求头"""
+    if not client_id:
+        client_id = str(uuid.uuid4())
+    
     return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36',
-        'Content-Type': 'application/json; charset=utf-8',
-        'Referer': f'https://m.weibo.cn/u/{weibo_id}',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Cookie': ''
+        'Content-Type': 'application/json',
+        'User-Agent': 'Ceobe-Canteen-Browser-Extension/4.0.5',
+        'x-ceobe-client-id': client_id,
+        'x-ceobe-client-type': 'browser-extension',
+        'x-ceobe-client-platform': 'chrome',
+        'x-ceobe-client-version': '4.0.5'
     }
 
-async def fetch_weibo_cookies() -> list:
-    browser = basic_browser_service.browser
-    context = await browser.new_context()
-    page = await context.new_page()
+# CeobeAPI辅助函数
+async def make_ceobe_request(url: str, method: str = 'GET', data: Optional[Dict] = None, 
+                            headers: Optional[Dict] = None, timeout: int = 10) -> Optional[Dict]:
+    """发送CeobeAPI请求 - 使用aiohttp直接请求避免amiyabot框架兼容性问题"""
     try:
-        await page.goto("https://weibo.com")
-        await page.wait_for_timeout(5000)
-        cookies = await context.cookies()
-        weibo_cookies = [cookie for cookie in cookies if cookie.get('domain') in ('.weibo.com', 'weibo.com')]
-        return weibo_cookies
-    finally:
-        await page.close()
-        await context.close()
+        if not headers:
+            headers = get_ceobe_headers()
+        else:
+            headers = headers.copy()
+        
+        debug_log(f"发送请求: {method} {url}")
+        if data:
+            debug_log(f"请求数据: {json.dumps(data, ensure_ascii=False)}")
+        
+        # 使用aiohttp直接发送请求，避免amiyabot的http_requests兼容性问题
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            if method.upper() == 'GET':
+                async with session.get(url, headers=headers) as response:
+                    debug_log(f"GET响应状态码: {response.status}")
+                    if response.status == 200:
+                        result = await response.json()
+                        debug_log(f"GET响应成功, 数据长度: {len(str(result))}")
+                        return result
+                    else:
+                        error_text = await response.text()
+                        debug_log(f"GET请求失败: HTTP {response.status}, 错误: {error_text[:200]}")
+                        return None
+                        
+            elif method.upper() == 'POST':
+                if data:
+                    async with session.post(url, headers=headers, json=data) as response:
+                        debug_log(f"POST响应状态码: {response.status}")
+                        if response.status == 200:
+                            result = await response.json()
+                            debug_log(f"POST响应成功, 数据长度: {len(str(result))}")
+                            return result
+                        else:
+                            error_text = await response.text()
+                            debug_log(f"POST请求失败: HTTP {response.status}, 错误: {error_text[:200]}")
+                            if response.status == 404:
+                                debug_log(f"404错误详情 - URL: {url}")
+                                debug_log(f"404错误详情 - Headers: {headers}")
+                                debug_log(f"404错误详情 - Data: {data}")
+                            return None
+                else:
+                    async with session.post(url, headers=headers) as response:
+                        debug_log(f"POST(无数据)响应状态码: {response.status}")
+                        if response.status == 200:
+                            result = await response.json()
+                            debug_log(f"POST(无数据)响应成功, 数据长度: {len(str(result))}")
+                            return result
+                        else:
+                            error_text = await response.text()
+                            debug_log(f"POST(无数据)请求失败: HTTP {response.status}, 错误: {error_text[:200]}")
+                            return None
+            else:
+                debug_log(f"不支持的HTTP方法: {method}")
+                return None
+            
+    except asyncio.TimeoutError:
+        debug_log(f"请求超时: {url}", force=True)
+        return None
+    except Exception as e:
+        debug_log(f"网络请求异常: {e}", force=True)
+        import traceback
+        debug_log(f"异常详情: {traceback.format_exc()}")
+        return None
+
+# 微博ID映射表 - 将原有的UID映射到CeobeAPI的数据源ID
+WEIBO_UID_TO_DATASOURCE = {
+    '6279793937': None,   # 明日方舟 - 需要通过API查询具体的数据源ID
+    '6441489862': None,   # 明日方舟朝陇山 - 需要通过API查询
+    '7745672941': None,   # 明日方舟终末地 - 需要通过API查询  
+    '7697896274': None,   # 来自星尘 - 需要通过API查询
+    '7751894824': None,   # 森空岛 - 需要通过API查询
+}
+
+async def get_available_datasources() -> Optional[List[Dict]]:
+    """获取可用的微博数据源列表"""
+    debug_log("开始获取可用数据源列表")
+    url = f'{SERVER_BASE}canteen/config/datasource/list'
+    
+    response = await make_ceobe_request(url)
+    if response and response.get('code') == '00000':
+        datasources = response.get('data', [])
+        debug_log(f"找到 {len(datasources)} 个数据源")
+        # 筛选微博数据源
+        weibo_sources = [ds for ds in datasources if ds.get('datasource') == 'weibo:dynamic-by-uid']
+        debug_log(f"其中微博数据源 {len(weibo_sources)} 个")
+        
+        # 显示可用的微博数据源
+        for i, source in enumerate(weibo_sources[:10]):  # 只显示前10个
+            debug_log(f"  数据源 {i+1}: {source.get('nickname', '未知')} (UID: {source.get('db_unique_key', '未知')}, ID: {source.get('unique_id', '未知')})")
+        
+        return weibo_sources
+    else:
+        debug_log(f"获取数据源列表失败: {response}", force=True)
+        return None
+
+async def get_datasource_combo_id(datasource_ids: List[str]) -> Optional[str]:
+    """获取数据源组合ID"""
+    debug_log(f"开始获取数据源组合ID，数据源ID列表: {datasource_ids}")
+    url = f'{SERVER_BASE}canteen/user/getDatasourceComb'
+    data = {'datasource_push': datasource_ids}
+    
+    response = await make_ceobe_request(url, 'POST', data)
+    if response and response.get('code') == '00000':
+        combo_id = response['data']['datasource_comb_id']
+        debug_log(f"成功获取组合ID: {combo_id}")
+        return combo_id
+    else:
+        error_msg = response.get('message', '未知错误') if response else '请求失败'
+        debug_log(f"获取组合ID失败: {error_msg}", force=True)
+        return None
+
+async def get_cookie_info(combo_id: str, max_retries: int = 3) -> Optional[Dict[str, str]]:
+    """获取cookie信息"""
+    debug_log(f"开始获取Cookie信息，组合ID: {combo_id}")
+    
+    # 检查组合ID是否有效 - 如果是单个点或过短，跳过
+    if not combo_id or combo_id.strip() == '.' or len(combo_id.strip()) < 2:
+        debug_log(f"组合ID无效或为空: '{combo_id}'，跳过获取Cookie", force=True)
+        return None
+    
+    url = f'{CDN_BASE}datasource-comb/{combo_id}'
+    
+    for attempt in range(max_retries):
+        if attempt > 0:
+            debug_log(f"第 {attempt + 1} 次重试获取Cookie信息")
+            await asyncio.sleep(2 ** attempt)  # 指数退避
+        
+        response = await make_ceobe_request(url)
+        if response:
+            cookie_id = response.get('cookie_id')
+            update_cookie_id = response.get('update_cookie_id')
+            
+            debug_log(f"Cookie响应: cookie_id={cookie_id}, update_cookie_id={update_cookie_id}")
+            
+            if cookie_id:
+                debug_log(f"成功获取Cookie ID: {cookie_id}")
+                return {
+                    'cookie_id': cookie_id,
+                    'update_cookie_id': update_cookie_id
+                }
+            else:
+                debug_log(f"尝试 {attempt + 1}: Cookie ID 为空，可能数据源暂无数据")
+        else:
+            debug_log(f"尝试 {attempt + 1}: 请求失败")
+    
+    debug_log("多次尝试后仍无法获取有效的Cookie ID（这通常是正常情况，表示没有新数据）")
+    return None
+
+# 保留兼容性函数（暂时不用）
+async def fetch_weibo_cookies() -> list:
+    return []
 
 def cookies_to_str(cookies: list) -> str:
-    if not cookies: return ''
-    return '; '.join([f"{cookie['name']}={cookie['value']}" for cookie in cookies])
+    return ''
 
 def to_lowercase_keys(d: dict) -> dict:
-    # helper小工具
     return {k.lower(): v for k, v in d.items() if not k.startswith(":")}
 
 async def load_headers_from_json_or_fallback(weibo_id: str) -> dict:
-    if os.path.exists(HEADERS_PATH):
-        try:
-            with open(HEADERS_PATH, "r", encoding="utf-8") as f:
-                headers = json.load(f)
-            clean_headers = to_lowercase_keys(headers)
-            if not clean_headers.get('cookie'):
-                cookies = await fetch_weibo_cookies()
-                clean_headers['cookie'] = cookies_to_str(cookies)
-                with open(HEADERS_PATH, "w", encoding="utf-8") as f:
-                    json.dump(clean_headers, f, ensure_ascii=False, indent=2)
-                await send_to_console_channel(Chain().text('微博 header.json 无Cookie，已自动刷新并写入cookie。'))
-            return clean_headers
-        except Exception as e:
-            await send_to_console_channel(Chain().text(f'微博 header.json 读取失败，自动降级获取cookie: {e}'))
-    # fallback
-    headers = get_default_headers(weibo_id)
-    cookies = await fetch_weibo_cookies()
-    headers['Cookie'] = cookies_to_str(cookies)
-    with open(HEADERS_PATH, "w", encoding="utf-8") as f:
-        json.dump(headers, f, ensure_ascii=False, indent=2)
-    await send_to_console_channel(Chain().text('微博 header.json 不存在，已自动生成并写入cookie。'))
-    return headers
+    return get_ceobe_headers()
 
 async def refresh_headers_and_json(weibo_id: str, info: str = ''):
-    headers = get_default_headers(weibo_id)
-    cookies = await fetch_weibo_cookies()
-    headers['Cookie'] = cookies_to_str(cookies)
-    with open(HEADERS_PATH, "w", encoding="utf-8") as f:
-        json.dump(headers, f, ensure_ascii=False, indent=2)
-    await send_to_console_channel(Chain().text(f'微博已自动刷新Cookie并写入header.json。原因: {info}'))
+    pass
 
 @dataclass
 class WeiboContent:
@@ -91,74 +228,245 @@ class WeiboContent:
 
 class WeiboUser:
     def __init__(self, weibo_id, setting):
-        self.url = 'https://m.weibo.cn/api/container/getIndex'
-        self.weibo_id = weibo_id
+        self.weibo_id = str(weibo_id).strip() if weibo_id else ''
         self.setting = setting
         self.user_name = ''
         self.images_cache_dir = self.setting.imagesCache
-        self.headers = None
+        self.client_id = str(uuid.uuid4())
+        self.headers = get_ceobe_headers(self.client_id)
+        
+        # 验证weibo_id有效性
+        if not self.weibo_id or self.weibo_id == '' or self.weibo_id == 'None':
+            debug_log(f"⚠️  无效的微博ID: '{weibo_id}', 已设置为空字符串", force=True)
+            self.weibo_id = ''
+        
+        # 设置调试开关
+        global DEBUG_CEOBE_API
+        if hasattr(setting, 'debugCeobeAPI'):
+            DEBUG_CEOBE_API = setting.debugCeobeAPI
+        
+        # CeobeAPI相关 - 改为使用所有微博数据源的组合
+        self.target_weibo_id = self.weibo_id  # 保存目标微博ID用于过滤
+        self.datasource_id = None
+        self.combo_id = None
+        self.current_cookies_cache = []
+        self.all_weibo_datasources = []  # 存储所有微博数据源
+        
+        # 错误状态追踪，避免重复的console输出
+        self.last_error_time = 0
+        self.error_count = 0
+        
+        debug_log(f"创建WeiboUser实例，目标微博ID: '{self.weibo_id}', 客户端ID: {self.client_id}")
+        
+        # 初始化数据源映射
+        self._initialize_datasource_mapping()
 
-    async def ensure_headers(self):
-        if self.headers is None:
-            self.headers = await load_headers_from_json_or_fallback(self.weibo_id)
+    def _initialize_datasource_mapping(self):
+        """初始化数据源映射 - 不再只查找单个数据源"""
+        # 保持兼容性，但实际上我们会使用所有微博数据源的组合
+        self.datasource_id = WEIBO_UID_TO_DATASOURCE.get(self.weibo_id)
+        
+    async def ensure_datasource_id(self):
+        """确保获取到所有微博数据源ID"""
+        # 如果微博ID为空或无效，直接返回False
+        if not self.weibo_id or self.weibo_id == '':
+            debug_log(f"微博ID为空或无效，跳过数据源查找", force=True)
+            return False
+        
+        # 获取所有可用的微博数据源
+        datasources = await get_available_datasources()
+        if not datasources:
+            current_time = time.time()
+            if current_time - self.last_error_time > 300:  
+                await send_to_console_channel(Chain().text(f'无法获取微博数据源列表 (UID: {self.weibo_id})'))
+                self.last_error_time = current_time
+            return False
+        
+        # 存储所有微博数据源，用于组合查询
+        self.all_weibo_datasources = datasources
+        debug_log(f"找到 {len(datasources)} 个微博数据源")
+        
+        # 查找目标用户名
+        for ds in datasources:
+            if ds.get('db_unique_key') == self.weibo_id:
+                self.user_name = ds.get('nickname', f'微博用户{self.weibo_id}')
+                debug_log(f"找到目标用户: {self.user_name} (UID: {self.weibo_id})")
+                break
+        
+        if not self.user_name:
+            self.user_name = f'微博用户{self.weibo_id}'
+            debug_log(f"未找到匹配的用户名，使用默认: {self.user_name}")
+            
+        return True
+        
+    async def ensure_combo_id(self):
+        """确保获取到组合ID - 使用所有微博数据源的组合"""
+        if self.combo_id:
+            return True
+            
+        if not await self.ensure_datasource_id():
+            return False
+        
+        # 使用所有微博数据源的ID来获取组合ID
+        all_datasource_ids = [ds.get('unique_id') for ds in self.all_weibo_datasources if ds.get('unique_id')]
+        debug_log(f"使用 {len(all_datasource_ids)} 个微博数据源获取组合ID")
+        
+        self.combo_id = await get_datasource_combo_id(all_datasource_ids)
+        if not self.combo_id:
+            debug_log(f"无法获取数据源组合ID", force=True)
+            return False
+        
+        # 验证combo_id的有效性
+        if self.combo_id.strip() == '.' or len(self.combo_id.strip()) < 2:
+            debug_log(f"获得无效的组合ID: '{self.combo_id}'，但这不应该发生在多数据源组合中", force=True)
+            return False
+            
+        return True
 
-    async def try_request(self, url):
-        await self.ensure_headers()
-        for _ in range(2):  # 最多重试1次
-            res = await http_requests.get(url, headers=self.headers)
-            try:
-                if res and res.response.status == 200:
-                    respjson = res.json
-                    if isinstance(respjson, dict) and 'data' in respjson:
-                        return respjson
-                    else:
-                        await refresh_headers_and_json(self.weibo_id, "接口无data字段，判定cookie失效，已自动刷新。")
-                        self.headers = await load_headers_from_json_or_fallback(self.weibo_id)
-                        continue  # retry
-            except Exception as e:
-                await send_to_console_channel(Chain().text(f'微博接口访问异常: {e}'))
+    async def get_ceobe_weibo_data(self) -> Optional[Dict]:
+        """从CeobeAPI获取微博数据"""
+        if not await self.ensure_combo_id():
             return None
-        await send_to_console_channel(Chain().text("微博接口重试多次仍然异常，请检查网络和header配置。"))
+            
+        # 获取Cookie信息
+        cookie_info = await get_cookie_info(self.combo_id)
+        if not cookie_info or not cookie_info.get('cookie_id'):
+            # 没有新数据是正常情况
+            return None
+            
+        # 获取微博数据
+        url = f'{SERVER_CDN_BASE}cdn/cookie/mainList/cookieList'
+        params = [f'datasource_comb_id={self.combo_id}', f'cookie_id={cookie_info["cookie_id"]}']  
+        
+        if cookie_info.get('update_cookie_id'):
+            params.append(f'update_cookie_id={cookie_info["update_cookie_id"]}')
+            
+        full_url = url + '?' + '&'.join(params)
+        
+        response = await make_ceobe_request(full_url)
+        if response and response.get('code') == '00000':
+            data = response.get('data', {})
+            cookies = data.get('cookies', [])
+            self.current_cookies_cache = cookies
+            return data
         return None
 
-    def __url(self, container_id=None):
-        c_id = f'&containerid={container_id}' if container_id else ''
-        return f'{self.url}?type=uid&uid={self.weibo_id}&value={self.weibo_id}{c_id}'
+    def format_ceobe_weibo_item(self, cookie_item: Dict) -> Dict[str, Any]:
+        """格式化CeobeAPI返回的微博数据"""
+        try:
+            item = cookie_item.get('item', {})
+            default_cookie = cookie_item.get('default_cookie', {})
+            timestamp = cookie_item.get('timestamp', {})
+            
+            # 处理可能为None的item
+            if item is None:
+                item = {}
+            
+            # 格式化时间
+            platform_time = timestamp.get('platform', 0)
+            fetcher_time = timestamp.get('fetcher', 0)
+            
+            formatted_time = None
+            if platform_time:
+                formatted_time = datetime.fromtimestamp(platform_time / 1000)
+            elif fetcher_time:
+                formatted_time = datetime.fromtimestamp(fetcher_time / 1000)
+            
+            # 时间过滤 - 处理最近7天的微博，避免推送历史内容但不过度严格
+            if formatted_time:
+                now = datetime.now()
+                # 允许最近7天的微博，给CeobeAPI一些容错空间
+                time_diff = now - formatted_time
+                if time_diff.days > 7:  # 超过7天的微博跳过
+                    debug_log(f"跳过旧微博 ID: {item.get('id', '未知')}, 时间: {formatted_time}")
+                    return {}
+                else:
+                    debug_log(f"保留微博 ID: {item.get('id', '未知')}, 时间: {formatted_time}, 距现在: {time_diff.days}天")
+            
+            # 处理图片
+            images = default_cookie.get('images', []) if default_cookie else []
+            image_urls = []
+            if images:
+                for img in images:
+                    if img and img.get('origin_url'):
+                        image_urls.append(img['origin_url'])
+            
+            return {
+                'id': item.get('id', ''),
+                'text': default_cookie.get('text', '') if default_cookie else '',
+                'url': item.get('url', ''),
+                'time': formatted_time,
+                'images': image_urls,
+                'is_retweeted': item.get('is_retweeted', False),
+                'retweeted_info': item.get('retweeted', {}) if item.get('is_retweeted') else None
+            }
+        except Exception as e:
+            debug_log(f"格式化微博数据时出错: {e}")
+            return {}
 
     async def get_user_name(self, result=None):
         if self.user_name:
             return self.user_name
-        if not result:
-            result = await self.try_request(self.__url())
-        if not result:
-            return self.user_name
-        if 'userInfo' not in result['data']:
-            return self.user_name
-        self.user_name = result['data']['userInfo']['screen_name']
+            
+        # 通过数据源获取用户名
+        if not await self.ensure_datasource_id():
+            self.user_name = f'微博用户{self.weibo_id}'
+            
         return self.user_name
 
     async def get_cards_list(self):
+        """从CeobeAPI获取微博列表（兼容原有接口）"""
+        data = await self.get_ceobe_weibo_data()
+        if not data:
+            return []
+            
+        cookies = data.get('cookies', [])
+        debug_log(f"从CeobeAPI获取到 {len(cookies)} 条微博数据")
+        
+        # 转换为类似原有格式的数据结构，并只保留目标用户的微博
         cards = []
-        result = await self.try_request(self.__url())
-        if not result or 'tabsInfo' not in result['data']:
-            return cards
-        await self.get_user_name(result)
-        tabs = result['data']['tabsInfo']['tabs']
-        container_id = ''
-        for tab in tabs:
-            if tab['tabKey'] == 'weibo':
-                container_id = tab['containerid']
-        if not container_id:
-            return cards
-        result = await self.try_request(self.__url(container_id))
-        if not result or 'cards' not in result['data']:
-            return cards
-        for item in result['data']['cards']:
-            if item['card_type'] == 9 and 'isTop' not in item['mblog'] and item['mblog']['mblogtype'] == 0:
-                cards.append(item)
+        for cookie in cookies:
+            # 检查是否是目标用户的微博
+            source_data = cookie.get('source', {}).get('data', '')
+            if source_data != self.target_weibo_id:
+                debug_log(f"跳过非目标用户微博: {source_data} (目标: {self.target_weibo_id})")
+                continue
+            
+            formatted = self.format_ceobe_weibo_item(cookie)
+            # 跳过空的格式化结果（比如被时间过滤掉的旧微博）
+            if not formatted or not formatted.get('id'):
+                continue
+                
+            # 构造类似原有cards格式的数据
+            card = {
+                'itemid': formatted['id'],
+                'scheme': formatted['url'],
+                'mblog': {
+                    'id': formatted['id'],
+                    'bid': formatted['id'],
+                    'text': formatted['text'],
+                    'created_at': formatted['time'].strftime('%a %b %d %H:%M:%S +0800 %Y') if formatted['time'] else '',
+                    'pics': self._format_pics_for_compatibility(formatted['images']),
+                    'retweeted_status': formatted['retweeted_info'] if formatted['is_retweeted'] else None
+                }
+            }
+            cards.append(card)
+            
+        debug_log(f"过滤后的目标用户({self.target_weibo_id})微博卡片数量: {len(cards)}")
         return cards
+        
+    def _format_pics_for_compatibility(self, image_urls: List[str]) -> List[Dict]:
+        """将图片URL格式化为兼容原有格式"""
+        pics = []
+        for url in image_urls:
+            pics.append({
+                'large': {'url': url},
+                'url': url
+            })
+        return pics
 
     async def get_blog_list(self):
+        """获取微博列表（兼容原有接口）"""
         cards = await self.get_cards_list()
         blog_list = []
         for index, item in enumerate(cards):
@@ -171,47 +479,67 @@ class WeiboUser:
                 if length >= 32:
                     content += '...'
                     break
-            date = item['mblog']['created_at']
-            date = time.strptime(date, '%a %b %d %H:%M:%S +0800 %Y')
-            date = time.strftime('%Y-%m-%d %H:%M:%S', date)
+            
+            # 处理时间格式
+            try:
+                if item['mblog']['created_at']:
+                    date = time.strptime(item['mblog']['created_at'], '%a %b %d %H:%M:%S +0800 %Y')
+                    date = time.strftime('%Y-%m-%d %H:%M:%S', date)
+                else:
+                    date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
             blog_list.append({'index': index + 1, 'date': date, 'content': content})
         return blog_list
 
     async def get_weibo_id(self, index: int):
+        """获取指定索引的微博ID"""
         cards = await self.get_cards_list()
-        if cards:
+        if cards and index < len(cards):
             return cards[index]['itemid']
+        return None
 
     async def get_weibo_content(self, index: int):
+        """获取指定索引的微博内容"""
         cards = await self.get_cards_list()
         if not cards:
             return None
         if index >= len(cards):
             index = len(cards) - 1
+            
         target_blog = cards[index]
         blog = target_blog['mblog']
-        result = await self.try_request('https://m.weibo.cn/statuses/extend?id=' + blog['id'])
-        if not result:
-            return None
-        content = WeiboContent(self.user_name)
-        text = result['data']['longTextContent']
+        
+        content = WeiboContent(await self.get_user_name())
+        
+        # 使用CeobeAPI已经处理好的文本内容
+        text = blog['text']
         text = re.sub(r'<br\s*/?>', '\n', text)
         text = remove_xml_tag(text)
         content.html_text = text.strip('\n')
         content.detail_url = target_blog['scheme']
 
-        pics = blog['pics'] if 'pics' in blog else []
+        # 处理图片
+        pics = blog.get('pics', [])
         for pic in pics:
-            pic_url = pic['large']['url']
+            pic_url = pic['url'] if 'url' in pic else pic.get('large', {}).get('url', '')
+            if not pic_url:
+                continue
+                
             name = pic_url.split('/')[-1]
-            suffix = name.split('.')[-1]
+            if '?' in name:
+                name = name.split('?')[0]
+            suffix = name.split('.')[-1] if '.' in name else 'jpg'
+            
             if suffix.lower() == 'gif':
                 if not self.setting.sendGIF:
                     continue
                 path = os.path.join(self.images_cache_dir, name)
                 create_dir(path, is_file=True)
                 if not os.path.exists(path):
-                    stream = await download_async(pic_url, headers=self.headers)
+                    # 使用普通的下载headers，不需要特殊的微博cookie
+                    stream = await download_async(pic_url)
                     if stream:
                         with open(path, 'wb') as f:
                             f.write(stream)
@@ -221,12 +549,14 @@ class WeiboUser:
                 path = os.path.join(self.images_cache_dir, name)
                 create_dir(path, is_file=True)
                 if not os.path.exists(path):
-                    stream = await download_async(pic_url, headers=self.headers)
+                    # 使用普通的下载headers，不需要特殊的微博cookie
+                    stream = await download_async(pic_url)
                     if stream:
                         with open(path, 'wb') as f:
                             f.write(stream)
                 content.pics_list.append(path)
                 content.pics_urls.append(pic_url)
+                
         # 图片拼接支持
         if content.pics_list:
             if hasattr(self, '_process_and_merge_images'):

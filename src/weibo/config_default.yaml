@@ -2,6 +2,10 @@ setting:
     checkRate: 30
     sendGIF: false
     imagesCache: log/weibo
+    # CeobeAPI配置
+    useCeobeAPI: true
+    ceobeAPITimeout: 10
+    debugCeobeAPI: true  # 调试开关，开启后会输出详细的API调用信息
 
 sendInterval: 0.2
 sendAsync: false
@@ -15,6 +19,7 @@ listen:
         name: '明日方舟终末地'
     -   uid: '7697896274'
         name: '来自星尘'
-
+    -   uid: '7751894824'
+        name: '森空岛'
 
 block: [ ]
