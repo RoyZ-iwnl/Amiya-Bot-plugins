@@ -252,9 +252,15 @@ class WeiboUser:
         self.current_cookies_cache = []
         self.all_weibo_datasources = []  # 存储所有微博数据源
         
-        # 错误状态追踪，避免重复的console输出
+        # 错误状态追踪，避免重复的console输出和实现重试机制
         self.last_error_time = 0
         self.error_count = 0
+        self.consecutive_failures = 0  # 连续失败次数
+        self.max_retry_count = 3      # 最大重试次数
+        self.retry_intervals = [30, 120, 300]  # 重试间隔（秒）: 30秒, 2分钟, 5分钟
+        self.is_disabled = False      # 是否因连续失败而禁用
+        self.last_success_time = time.time()  # 上次成功时间
+        self.disable_until_manual = False  # 是否需要手动重新启用
         
         debug_log(f"创建WeiboUser实例，目标微博ID: '{self.weibo_id}', 客户端ID: {self.client_id}")
         
@@ -266,21 +272,73 @@ class WeiboUser:
         # 保持兼容性，但实际上我们会使用所有微博数据源的组合
         self.datasource_id = WEIBO_UID_TO_DATASOURCE.get(self.weibo_id)
         
+    def reset_error_state(self):
+        """重置错误状态（用于手动触发时重新启用）"""
+        self.consecutive_failures = 0
+        self.is_disabled = False
+        self.disable_until_manual = False
+        self.last_success_time = time.time()
+        debug_log(f"重置错误状态 (UID: {self.weibo_id})")
+    
+    def should_retry(self) -> bool:
+        """判断是否应该重试"""
+        if self.disable_until_manual:
+            debug_log(f"数据源已禁用，需要手动重新启用 (UID: {self.weibo_id})")
+            return False
+        
+        if self.consecutive_failures >= self.max_retry_count:
+            debug_log(f"超过最大重试次数，禁用数据源 (UID: {self.weibo_id})")
+            return False
+        
+        # 检查是否到了重试时间
+        if self.consecutive_failures > 0:
+            retry_interval = self.retry_intervals[min(self.consecutive_failures - 1, len(self.retry_intervals) - 1)]
+            if time.time() - self.last_error_time < retry_interval:
+                debug_log(f"尚未到重试时间，剩余 {retry_interval - (time.time() - self.last_error_time):.1f} 秒 (UID: {self.weibo_id})")
+                return False
+        
+        return True
+    
     async def ensure_datasource_id(self):
-        """确保获取到所有微博数据源ID"""
+        """确保获取到所有微博数据源ID（带重试机制）"""
         # 如果微博ID为空或无效，直接返回False
         if not self.weibo_id or self.weibo_id == '':
             debug_log(f"微博ID为空或无效，跳过数据源查找", force=True)
             return False
         
+        # 检查是否应该重试
+        if not self.should_retry():
+            return False
+        
         # 获取所有可用的微博数据源
         datasources = await get_available_datasources()
         if not datasources:
+            self.consecutive_failures += 1
             current_time = time.time()
-            if current_time - self.last_error_time > 300:  
-                await send_to_console_channel(Chain().text(f'无法获取微博数据源列表 (UID: {self.weibo_id})'))
-                self.last_error_time = current_time
+            self.last_error_time = current_time
+            
+            # 根据失败次数决定处理方式
+            if self.consecutive_failures >= self.max_retry_count:
+                self.disable_until_manual = True
+                await send_to_console_channel(Chain().text(
+                    f'微博数据源连续获取失败 {self.max_retry_count} 次，已禁用自动推送\n'
+                    f'UID: {self.weibo_id}\n'
+                    f'请手动发送"微博"关键词重新启用'
+                ))
+            else:
+                next_retry = self.retry_intervals[min(self.consecutive_failures - 1, len(self.retry_intervals) - 1)]
+                await send_to_console_channel(Chain().text(
+                    f'无法获取微博数据源列表 (第{self.consecutive_failures}次失败)\n'
+                    f'UID: {self.weibo_id}\n'
+                    f'{next_retry//60}分钟后重试'
+                ))
             return False
+        
+        # 成功获取数据源，重置失败计数
+        if self.consecutive_failures > 0:
+            debug_log(f"数据源恢复正常，重置失败计数 (UID: {self.weibo_id})")
+            self.consecutive_failures = 0
+            self.last_success_time = time.time()
         
         # 存储所有微博数据源，用于组合查询
         self.all_weibo_datasources = datasources
@@ -522,9 +580,17 @@ class WeiboUser:
 
         # 处理图片
         pics = blog.get('pics', [])
-        for pic in pics:
+        if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+            debug_log(f"开始处理图片，pics数量: {len(pics)}")
+        
+        for i, pic in enumerate(pics):
             pic_url = pic['url'] if 'url' in pic else pic.get('large', {}).get('url', '')
+            if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                debug_log(f"处理第{i+1}张图片: {pic_url}")
+            
             if not pic_url:
+                if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                    debug_log(f"跳过第{i+1}张图片：没有URL")
                 continue
                 
             name = pic_url.split('/')[-1]
@@ -532,30 +598,74 @@ class WeiboUser:
                 name = name.split('?')[0]
             suffix = name.split('.')[-1] if '.' in name else 'jpg'
             
+            if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                debug_log(f"图片文件名: {name}, 后缀: {suffix}")
+            
             if suffix.lower() == 'gif':
                 if not self.setting.sendGIF:
+                    if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                        debug_log(f"跳过GIF: sendGIF配置为{self.setting.sendGIF}")
                     continue
                 path = os.path.join(self.images_cache_dir, name)
                 create_dir(path, is_file=True)
                 if not os.path.exists(path):
+                    if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                        debug_log(f"开始下载GIF: {pic_url}")
                     # 使用普通的下载headers，不需要特殊的微博cookie
-                    stream = await download_async(pic_url)
-                    if stream:
-                        with open(path, 'wb') as f:
-                            f.write(stream)
+                    try:
+                        stream = await download_async(pic_url)
+                        if stream:
+                            with open(path, 'wb') as f:
+                                f.write(stream)
+                            if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                                debug_log(f"GIF下载成功: {path}, 大小: {len(stream)} 字节")
+                        else:
+                            if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                                debug_log(f"GIF下载失败: download_async返回None - {pic_url}")
+                            continue
+                    except Exception as e:
+                        if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                            debug_log(f"GIF下载异常: {e} - {pic_url}")
+                            import traceback
+                            debug_log(f"异常详情: {traceback.format_exc()}")
+                        continue
+                else:
+                    if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                        debug_log(f"GIF已存在: {path}")
                 content.gif_list.append(path)
                 content.gif_urls.append(pic_url)
             else:
                 path = os.path.join(self.images_cache_dir, name)
                 create_dir(path, is_file=True)
                 if not os.path.exists(path):
+                    if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                        debug_log(f"开始下载图片: {pic_url}")
                     # 使用普通的下载headers，不需要特殊的微博cookie
-                    stream = await download_async(pic_url)
-                    if stream:
-                        with open(path, 'wb') as f:
-                            f.write(stream)
+                    try:
+                        stream = await download_async(pic_url)
+                        if stream:
+                            with open(path, 'wb') as f:
+                                f.write(stream)
+                            if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                                debug_log(f"图片下载成功: {path}, 大小: {len(stream)} 字节")
+                        else:
+                            if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                                debug_log(f"图片下载失败: download_async返回None - {pic_url}")
+                            continue
+                    except Exception as e:
+                        if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                            debug_log(f"图片下载异常: {e} - {pic_url}")
+                            import traceback
+                            debug_log(f"异常详情: {traceback.format_exc()}")
+                        continue
+                else:
+                    if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+                        debug_log(f"图片已存在: {path}")
                 content.pics_list.append(path)
                 content.pics_urls.append(pic_url)
+                
+        if hasattr(self.setting, 'debugCeobeAPI') and self.setting.debugCeobeAPI:
+            debug_log(f"图片处理完成 - pics_list: {len(content.pics_list)}, pics_urls: {len(content.pics_urls)}, gif_list: {len(content.gif_list)}, gif_urls: {len(content.gif_urls)}")
                 
         # 图片拼接支持
         if content.pics_list:

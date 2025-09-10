@@ -249,6 +249,9 @@ async def _(data: Message):
                 return None
 
             weibo = WeiboUser(listens[index]['uid'], setting)
+    
+    # 手动触发时重置错误状态（重新启用禁用的数据源）
+    weibo.reset_error_state()
 
     message = data.text_digits
     index = 0
@@ -291,6 +294,13 @@ async def _(_):
             continue
             
         weibo = WeiboUser(user, attridict(bot.get_config('setting')))
+        
+        # 检查是否应该跳过这个数据源
+        if weibo.disable_until_manual:
+            continue  # 已禁用，等待手动重启
+            
+        if not weibo.should_retry():
+            continue  # 尚未到重试时间
 
         new_id = await weibo.get_weibo_id(0)
         if not new_id:
@@ -313,6 +323,24 @@ async def _(_):
         if not result:
             await send_to_console_channel(Chain().text(f'微博获取失败\nUSER: {user}\nID: {new_id}'))
             return
+
+        # 添加调试日志（受debugCeobeAPI开关控制）
+        if bot.get_config('setting').get('debugCeobeAPI', False):
+            print(f"[微博推送调试] 获取到微博内容:")
+            print(f"  用户: {result.user_name}")
+            print(f"  文本长度: {len(result.html_text)}")
+            print(f"  图片数量: pics_list={len(result.pics_list)}, pics_urls={len(result.pics_urls)}")
+            print(f"  GIF数量: gif_list={len(result.gif_list)}, gif_urls={len(result.gif_urls)}")
+            if result.pics_list:
+                print(f"  图片文件:")
+                for i, path in enumerate(result.pics_list):
+                    exists = os.path.exists(path)
+                    print(f"    [{i+1}] {path} (存在: {exists})")
+            if result.gif_list:
+                print(f"  GIF文件:")
+                for i, path in enumerate(result.gif_list):
+                    exists = os.path.exists(path)
+                    print(f"    [{i+1}] {path} (存在: {exists})")
 
         send = True
         for regex in bot.get_config("block"):
@@ -342,28 +370,46 @@ async def _(_):
             if not instance:
                 continue
 
+            debug_enabled = bot.get_config('setting').get('debugCeobeAPI', False)
+            if debug_enabled:
+                print(f"[微博推送调试] 开始为 {item.group_id} 构建消息")
+            
             data.text(f'来自 {result.user_name} 的最新微博\n\n{html.unescape(result.html_text)}')
 
             if isinstance(instance.instance, QQGuildBotInstance):
+                if debug_enabled:
+                    print(f"[微博推送调试] QQ频道模式")
                 if not instance.instance.private:
                     # QQ频道公域，发送图片URL
+                    if debug_enabled:
+                        print(f"[微博推送调试] QQ频道公域，发送图片URL: {len(result.pics_urls)}张")
                     for url in result.pics_urls:
                         data.image(url=url)
                     # GIF以图片URL形式发送
+                    if debug_enabled:
+                        print(f"[微博推送调试] QQ频道公域，发送GIF URL: {len(result.gif_urls)}张")
                     for url in result.gif_urls:
                         data.image(url=url)
                 else:
                     # QQ频道私域，发送本地图片文件
+                    if debug_enabled:
+                        print(f"[微博推送调试] QQ频道私域，发送本地图片文件: {len(result.pics_list)}张")
                     if result.pics_list:
                         data.image(result.pics_list)
                     # GIF以图片文件形式发送
+                    if debug_enabled:
+                        print(f"[微博推送调试] QQ频道私域，发送GIF文件: {len(result.gif_list)}张")
                     if result.gif_list:
                         data.image(result.gif_list)
             elif is_comwechat_instance(instance.instance):
                 # ComWeChat平台
+                if debug_enabled:
+                    print(f"[微博推送调试] ComWeChat模式，发送图片文件: {len(result.pics_list)}张")
                 if result.pics_list:
                     data.image(result.pics_list)
                 # GIF使用Face元素发送，并在发送前检查是否需要压缩
+                if debug_enabled:
+                    print(f"[微博推送调试] ComWeChat模式，发送GIF文件: {len(result.gif_list)}张")
                 if result.gif_list:
                     cache_dir = weibo.images_cache_dir  # 从weibo实例获取缓存目录
                     for gif_path in result.gif_list:
@@ -373,11 +419,25 @@ async def _(_):
                 data.text(f'\n\n{result.detail_url}')
             else:
                 # 普通群聊，发送本地图片文件
+                if debug_enabled:
+                    print(f"[微博推送调试] 普通群聊模式，发送图片文件: {len(result.pics_list)}张")
                 if result.pics_list:
                     data.image(result.pics_list)
+                    if debug_enabled:
+                        print(f"[微博推送调试] 已添加图片到消息链: {result.pics_list}")
+                else:
+                    if debug_enabled:
+                        print(f"[微博推送调试] 没有图片需要发送")
                 # GIF以图片文件形式发送
+                if debug_enabled:
+                    print(f"[微博推送调试] 普通群聊模式，发送GIF文件: {len(result.gif_list)}张")
                 if result.gif_list:
                     data.image(result.gif_list)
+                    if debug_enabled:
+                        print(f"[微博推送调试] 已添加GIF到消息链: {result.gif_list}")
+                else:
+                    if debug_enabled:
+                        print(f"[微博推送调试] 没有GIF需要发送")
                 data.text(f'\n\n{result.detail_url}')
 
             if bot.get_config('sendAsync'):
