@@ -1,33 +1,16 @@
 setting:
-    checkRate: 60  # 聚合推送检查间隔，改为60秒
-    sendGIF: false
-    imagesCache: log/aggregator  # 改为聚合推送目录
-    # CeobeAPI配置
-    useCeobeAPI: true
-    ceobeAPITimeout: 10
-    debugCeobeAPI: true  # 调试开关，开启后会输出详细的API调用信息
+    checkRate: 60  # 聚合推送检查间隔(秒)
+    imagesCache: log/aggregator  # 图片缓存目录
+    debugCeobeAPI: false  # 调试开关，开启后会输出详细的API调用信息
     # 聚合推送配置
     enableAggregator: true  # 启用聚合推送功能
     maxImagesPerPost: 9  # 每条内容最多发送的图片数量
     contentPreviewLength: 200  # 内容预览长度
 
-sendInterval: 0.5  # 发送间隔稍微增加
-sendAsync: false
+sendInterval: 0.5  # 发送间隔
+sendAsync: false   # 是否异步发送
 
-# 兼容性：保留原有微博监听配置
-listen:
-    -   uid: '6279793937'
-        name: '明日方舟'
-    -   uid: '6441489862'
-        name: '明日方舟朝陇山'
-    -   uid: '7745672941'
-        name: '明日方舟终末地'
-    -   uid: '7697896274'
-        name: '来自星尘'
-    -   uid: '7751894824'
-        name: '森空岛'
-
-block: [ ]
+block: [ ]  # 内容屏蔽正则表达式列表
 
 # 聚合推送配置
 aggregator:
