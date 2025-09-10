@@ -1,15 +1,20 @@
 setting:
-    checkRate: 30
+    checkRate: 60  # 聚合推送检查间隔，改为60秒
     sendGIF: false
-    imagesCache: log/weibo
+    imagesCache: log/aggregator  # 改为聚合推送目录
     # CeobeAPI配置
     useCeobeAPI: true
     ceobeAPITimeout: 10
     debugCeobeAPI: true  # 调试开关，开启后会输出详细的API调用信息
+    # 聚合推送配置
+    enableAggregator: true  # 启用聚合推送功能
+    maxImagesPerPost: 9  # 每条内容最多发送的图片数量
+    contentPreviewLength: 200  # 内容预览长度
 
-sendInterval: 0.2
+sendInterval: 0.5  # 发送间隔稍微增加
 sendAsync: false
 
+# 兼容性：保留原有微博监听配置
 listen:
     -   uid: '6279793937'
         name: '明日方舟'
@@ -23,3 +28,13 @@ listen:
         name: '森空岛'
 
 block: [ ]
+
+# 聚合推送配置
+aggregator:
+    subscriptionFile: "aggregator_subscriptions.json"  # 订阅配置文件
+    supportedPlatforms:  # 支持的平台
+        - weibo
+        - bilibili
+        - netease-cloud-music
+        - arknights-game
+        - arknights-website

@@ -19,3 +19,4 @@ assistant-*
 
 src/weibo/claudehelper/*.*
 src/weibo/claudehelper
+*.pyc

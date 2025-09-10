@@ -4,17 +4,18 @@
     "required": [],
     "properties": {
         "setting": {
-            "title": "监听设置",
+            "title": "推送设置",
             "type": "object",
             "required": [
                 "checkRate"
             ],
             "properties": {
                 "checkRate": {
-                    "title": "监听频率",
-                    "description": "每隔一定时间刷新一下微博列表的频率，单位秒",
+                    "title": "检查频率",
+                    "description": "每隔一定时间检查新内容的频率，单位秒（聚合推送建议60秒以上）",
                     "type": "integer",
-                    "default": 30
+                    "default": 60,
+                    "minimum": 30
                 },
                 "sendGIF": {
                     "title": "是否发送GIF图",
@@ -23,13 +24,13 @@
                 },
                 "imagesCache": {
                     "title": "图片缓存目录",
-                    "description": "微博图片缓存的目录，可以为绝对路径",
+                    "description": "内容图片缓存的目录，可以为绝对路径",
                     "type": "string",
-                    "default": "log/weibo"
+                    "default": "log/aggregator"
                 },
                 "useCeobeAPI": {
                     "title": "使用CeobeAPI",
-                    "description": "是否使用小刻食堂CeobeAPI获取微博数据",
+                    "description": "是否使用小刻食堂CeobeAPI获取数据（推荐开启）",
                     "type": "boolean",
                     "default": true
                 },
@@ -37,13 +38,37 @@
                     "title": "API请求超时",
                     "description": "CeobeAPI请求超时时间，单位秒",
                     "type": "integer",
-                    "default": 10
+                    "default": 10,
+                    "minimum": 5,
+                    "maximum": 30
                 },
                 "debugCeobeAPI": {
                     "title": "调试模式",
                     "description": "开启CeobeAPI调试输出，显示详细的API调用信息",
                     "type": "boolean",
                     "default": false
+                },
+                "enableAggregator": {
+                    "title": "启用聚合推送",
+                    "description": "开启多平台聚合推送功能",
+                    "type": "boolean",
+                    "default": true
+                },
+                "maxImagesPerPost": {
+                    "title": "最大图片数量",
+                    "description": "每条内容最多发送的图片数量",
+                    "type": "integer",
+                    "default": 9,
+                    "minimum": 1,
+                    "maximum": 20
+                },
+                "contentPreviewLength": {
+                    "title": "内容预览长度",
+                    "description": "内容文本预览的最大字符数",
+                    "type": "integer",
+                    "default": 200,
+                    "minimum": 50,
+                    "maximum": 500
                 }
             }
         },
@@ -57,18 +82,20 @@
             "title": "发送间隔",
             "description": "如果不是同时发送，每隔一定时间向下一个群推送",
             "type": "number",
-            "default": 0.2
+            "default": 0.5,
+            "minimum": 0.1,
+            "maximum": 5.0
         },
         "listen": {
-            "title": "监听列表",
-            "description": "监听的微博ID的列表（支持CeobeAPI和原始微博API）",
+            "title": "兼容性监听列表",
+            "description": "兼容原微博插件的监听配置（建议使用聚合推送功能）",
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
                     "uid": {
-                        "title": "微博 ID",
-                        "description": "微博用户ID，支持森空岛、明日方舟、鹰角网络等官方账号",
+                        "title": "用户 ID",
+                        "description": "用户ID，支持微博UID等",
                         "type": "string"
                     },
                     "name": {
@@ -80,10 +107,31 @@
         },
         "block": {
             "title": "规则屏蔽",
-            "description": "正文触发列表中任一规则匹配（包括正则表达式和搜索）的微博将不会推送（即使仍然会被记录）",
+            "description": "正文触发列表中任一规则匹配（包括正则表达式和搜索）的内容将不会推送",
             "type": "array",
-            "default": [
-            ]
+            "default": []
+        },
+        "aggregator": {
+            "title": "聚合推送配置",
+            "type": "object",
+            "properties": {
+                "subscriptionFile": {
+                    "title": "订阅配置文件",
+                    "description": "存储群组订阅信息的JSON文件名",
+                    "type": "string",
+                    "default": "aggregator_subscriptions.json"
+                },
+                "supportedPlatforms": {
+                    "title": "支持的平台",
+                    "description": "聚合推送支持的平台列表",
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["weibo", "bilibili", "netease-cloud-music", "arknights-game", "arknights-website"]
+                    },
+                    "default": ["weibo", "bilibili", "netease-cloud-music", "arknights-game", "arknights-website"]
+                }
+            }
         }
     }
 }
