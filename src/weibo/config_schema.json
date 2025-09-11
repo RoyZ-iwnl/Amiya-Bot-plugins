@@ -40,8 +40,8 @@
                     "description": "单条内容推送时包含的最大图片数量",
                     "type": "integer",
                     "default": 9,
-                    "minimum": 1,
-                    "maximum": 20
+                    "minimum": 0,
+                    "maximum": 999
                 },
                 "contentPreviewLength": {
                     "title": "内容预览长度",

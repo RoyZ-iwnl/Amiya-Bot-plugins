@@ -210,7 +210,9 @@ async def build_aggregated_message(content: UnifiedContent, data: MessageStructu
             
             # 下载并添加图片
             image_paths = []
-            for url in content.media_urls[:9]:  # 最多9张图片
+            max_images = bot.get_config('setting', {}).get('maxImagesPerPost', 9)
+            media_urls = content.media_urls if max_images <= 0 else content.media_urls[:max_images]
+            for url in media_urls:  # 从配置读取图片数量上限（0表示不限制）
                 path = await download_media_file(url, images_cache_dir)
                 if path:
                     image_paths.append(path)
@@ -431,7 +433,9 @@ async def process_single_aggregated_content(raw_data: dict, subscriptions: List[
                     cache_dir = setting.get('imagesCache', 'log/aggregator')
                     
                     image_paths = []
-                    for url in content.media_urls[:9]:  # 最多9张图片
+                    max_images = bot.get_config('setting', {}).get('maxImagesPerPost', 9)
+                    media_urls = content.media_urls if max_images <= 0 else content.media_urls[:max_images]
+                    for url in media_urls:  # 从配置读取图片数量上限（0表示不限制）
                         path = await download_media_file(url, cache_dir)
                         if path:
                             image_paths.append(path)
