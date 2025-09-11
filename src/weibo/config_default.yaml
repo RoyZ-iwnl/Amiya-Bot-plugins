@@ -5,7 +5,7 @@ setting:
     # 聚合推送配置
     enableAggregator: true  # 启用聚合推送功能
     maxImagesPerPost: 9  # 每条内容最多发送的图片数量
-    contentPreviewLength: 200  # 内容预览长度
+    contentPreviewLength: 0  # 内容预览长度（0表示不限制长度，全部发送）
 
 sendInterval: 0.5  # 发送间隔
 sendAsync: false   # 是否异步发送

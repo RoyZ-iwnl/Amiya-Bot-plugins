@@ -23,15 +23,23 @@ SERVER_BASE = 'https://server.ceobecanteen.top/api/v1/'
 SERVER_CDN_BASE = 'https://server-cdn.ceobecanteen.top/api/v1/'
 CDN_BASE = 'https://cdn.ceobecanteen.top/'
 
-# 调试开关 - 可在配置文件中设置
-DEBUG_CEOBE_API = True  # 可通过setting.debugCeobeAPI控制
+# 调试开关 - 从配置文件读取
+DEBUG_CEOBE_API = True  # 默认值，实际值从bot配置读取
 
 # 保持原有的headers.json路径用于兼容性
 #HEADERS_PATH = os.path.join(os.path.dirname(__file__), "headers.json")
 
-def debug_log(message: str, force: bool = False):
+def debug_log(message: str, force: bool = False, bot_instance=None):
     """调试日志输出 - 只在开启调试时输出"""
-    if DEBUG_CEOBE_API or force:
+    # 尝试从bot实例获取调试开关
+    debug_enabled = DEBUG_CEOBE_API
+    if bot_instance:
+        try:
+            debug_enabled = bot_instance.get_config('setting', {}).get('debugCeobeAPI', False)
+        except:
+            pass
+    
+    if debug_enabled or force:
         print(f"[CeobeAPI Debug] {message}")
 
 def get_ceobe_headers(client_id: str = None) -> dict:
@@ -185,9 +193,9 @@ class UnifiedContent:
     source_url: str = '' # 原文链接
     media_urls: List[str] = field(default_factory=list)  # 媒体URL列表
 
-    def get_display_text(self, max_length: int = 200) -> str:
+    def get_display_text(self, max_length: int = 0) -> str:
         """获取显示文本（限制长度）"""
-        if len(self.text) <= max_length:
+        if max_length <= 0 or len(self.text) <= max_length:
             return self.text
         return self.text[:max_length] + "..."
 
@@ -271,8 +279,13 @@ def adapt_content_to_unified(raw_data: Dict[str, Any]) -> Optional[UnifiedConten
         item = raw_data.get('item', {})
         default_cookie = raw_data.get('default_cookie', {})
         
-        # datasource 是字符串，需要从中提取信息
+        # datasource 是字符串，直接用作数据源标识
         datasource_name = raw_data.get('datasource', '')
+        
+        # 直接使用datasource_name作为source_id，简单直接
+        source_id = datasource_name
+        
+        debug_log(f"内容数据源: {datasource_name}", bot_instance=aggregator_manager.bot_instance if aggregator_manager else None)
         
         # 从URL或datasource名称推断平台信息
         platform = 'unknown'
@@ -335,7 +348,7 @@ def adapt_content_to_unified(raw_data: Dict[str, Any]) -> Optional[UnifiedConten
         return UnifiedContent(
             content_id=content_id,
             platform=platform,
-            source_id=source.get('data', ''),  # 使用 source.data 作为来源ID
+            source_id=source_id,  # 使用正确提取的数据源ID
             source_name=datasource_name,       # 使用 datasource 字符串作为来源名称
             text=text,
             publish_time=publish_time,
@@ -353,12 +366,13 @@ def adapt_content_to_unified(raw_data: Dict[str, Any]) -> Optional[UnifiedConten
 class AggregatorSubscriptionManager:
     """聚合推送订阅管理器 - 基于JSON文件"""
     
-    def __init__(self, config_file: str = 'aggregator_subscriptions.json'):
+    def __init__(self, config_file: str = 'aggregator_subscriptions.json', bot_instance=None):
         # 确保配置文件在插件目录下
         plugin_dir = os.path.dirname(__file__)
         self.config_file = os.path.join(plugin_dir, config_file)
         self.subscriptions = {}  # group_id_bot_id -> {datasource_ids, enabled, last_update}
         self.datasources = {}    # datasource_id -> datasource_info
+        self.bot_instance = bot_instance  # 保存bot实例用于日志
         self._load_subscriptions()
     
     def _get_group_key(self, group_id: str, bot_id: str) -> str:
@@ -377,10 +391,10 @@ class AggregatorSubscriptionManager:
             
             self.subscriptions = data.get('subscriptions', {})
             self.datasources = data.get('datasources', {})
-            debug_log(f"加载了 {len(self.subscriptions)} 个订阅配置")
+            debug_log(f"加载了 {len(self.subscriptions)} 个订阅配置", bot_instance=self.bot_instance)
             
         except Exception as e:
-            debug_log(f"加载订阅配置失败: {e}", force=True)
+            debug_log(f"加载订阅配置失败: {e}", force=True, bot_instance=self.bot_instance)
             self.subscriptions = {}
             self.datasources = {}
     
@@ -397,31 +411,42 @@ class AggregatorSubscriptionManager:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 
-            debug_log(f"订阅配置已保存到 {self.config_file}")
+            debug_log(f"订阅配置已保存到 {self.config_file}", bot_instance=self.bot_instance)
             
         except Exception as e:
-            debug_log(f"保存订阅配置失败: {e}", force=True)
+            debug_log(f"保存订阅配置失败: {e}", force=True, bot_instance=self.bot_instance)
     
     def add_subscription(self, group_id: str, bot_id: str, datasource_ids: List[str]) -> bool:
-        """添加订阅"""
+        """添加订阅 - datasource_ids现在是数据源名称列表"""
         try:
             group_key = self._get_group_key(group_id, bot_id)
+            
+            # 将UUID转换为数据源名称
+            datasource_names = []
+            for uuid_id in datasource_ids:
+                ds_info = self.datasources.get(uuid_id)
+                if ds_info:
+                    nickname = ds_info.get('nickname', '未知数据源')
+                    datasource_names.append(nickname)
+                else:
+                    datasource_names.append(uuid_id)  # 如果找不到，保留原ID
             
             self.subscriptions[group_key] = {
                 'group_id': group_id,
                 'bot_id': bot_id,
-                'datasource_ids': datasource_ids,
+                'datasource_ids': datasource_ids,      # 保留UUID用于向后兼容
+                'datasource_names': datasource_names,  # 新增：数据源名称列表
                 'enabled': True,
                 'added_time': time.time(),
                 'last_update': time.time()
             }
             
             self._save_subscriptions()
-            debug_log(f"成功添加订阅: {group_id} -> {len(datasource_ids)} 个数据源")
+            debug_log(f"成功添加订阅: {group_id} -> {len(datasource_names)} 个数据源: {datasource_names}", bot_instance=self.bot_instance)
             return True
             
         except Exception as e:
-            debug_log(f"添加订阅失败: {e}", force=True)
+            debug_log(f"添加订阅失败: {e}", force=True, bot_instance=self.bot_instance)
             return False
     
     def remove_subscription(self, group_id: str, bot_id: str) -> bool:
@@ -433,13 +458,13 @@ class AggregatorSubscriptionManager:
                 self.subscriptions[group_key]['enabled'] = False
                 self.subscriptions[group_key]['last_update'] = time.time()
                 self._save_subscriptions()
-                debug_log(f"成功禁用订阅: {group_id}")
+                debug_log(f"成功禁用订阅: {group_id}", bot_instance=self.bot_instance)
                 return True
             
             return False
             
         except Exception as e:
-            debug_log(f"移除订阅失败: {e}", force=True)
+            debug_log(f"移除订阅失败: {e}", force=True, bot_instance=self.bot_instance)
             return False
     
     def get_enabled_subscriptions(self) -> List[Dict]:
@@ -457,7 +482,7 @@ class AggregatorSubscriptionManager:
             if unique_id:
                 self.datasources[unique_id] = ds
         self._save_subscriptions()
-        debug_log(f"更新了 {len(datasources)} 个数据源信息")
+        debug_log(f"更新了 {len(datasources)} 个数据源信息", bot_instance=self.bot_instance)
     
     def generate_datasource_menu(self, supported_platforms: List[str] = None) -> Tuple[str, Dict[int, str]]:
         """生成数据源选择菜单"""
@@ -495,5 +520,12 @@ class AggregatorSubscriptionManager:
         return menu_text, index_map
 
 
-# 全局订阅管理器实例
-aggregator_manager = AggregatorSubscriptionManager()
+# 全局订阅管理器实例 - 稍后在main.py中传入bot实例
+aggregator_manager = None
+
+def initialize_aggregator_manager(bot_instance):
+    """初始化全局订阅管理器"""
+    global aggregator_manager
+    if aggregator_manager is None:
+        aggregator_manager = AggregatorSubscriptionManager(bot_instance=bot_instance)
+    return aggregator_manager

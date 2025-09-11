@@ -16,7 +16,7 @@ try:
 except ImportError:
     from core.util import AttrDict as attridict
 
-from .helper import get_all_datasources, get_aggregated_content, adapt_content_to_unified, aggregator_manager, UnifiedContent
+from .helper import get_all_datasources, get_aggregated_content, adapt_content_to_unified, initialize_aggregator_manager, UnifiedContent
 
 curr_dir = os.path.dirname(__file__)
 
@@ -25,14 +25,17 @@ class WeiboPluginInstance(AmiyaBotPluginInstance): ...
 bot = WeiboPluginInstance(
     name='CeobeAPI聚合推送',
     version='4.0',
-    plugin_id='amiyabot-aggregator',
-    plugin_type='official',
+    plugin_id='royz-arknights-aggregator',
+    plugin_type='',
     description='基于CeobeAPI的多平台聚合推送系统',
     document=f'{curr_dir}/README.md',
     instruction=f'{curr_dir}/README_USE.md',
     global_config_schema=f'{curr_dir}/config_schema.json',
     global_config_default=f'{curr_dir}/config_default.yaml',
 )
+
+# 初始化订阅管理器
+aggregator_manager = initialize_aggregator_manager(bot)
 
 @table
 class AggregatorRecord(MessageBaseModel):
@@ -129,6 +132,8 @@ async def enable_aggregator_push(data: Message):
             return Chain(data).text('订阅设置失败，请重试')
 
     except Exception as e:
+        from .helper import debug_log
+        debug_log(f"开启聚合推送失败: {e}", force=True, bot_instance=bot)
         print(f"开启聚合推送失败: {e}")
         return Chain(data).text('设置失败，请检查日志或重试')
 
@@ -176,6 +181,8 @@ async def get_latest_aggregated_content(data: Message):
             return Chain(data).text('内容处理失败')
             
     except Exception as e:
+        from .helper import debug_log
+        debug_log(f"获取最新聚合内容失败: {e}", force=True, bot_instance=bot)
         print(f"获取最新聚合内容失败: {e}")
         return Chain(data).text('获取失败，请检查日志或重试')
 
@@ -190,8 +197,9 @@ async def build_aggregated_message(content: UnifiedContent, data: MessageStructu
         if content.publish_time:
             header += f"\n时间: {content.publish_time.strftime('%Y-%m-%d %H:%M')}"
         
-        # 限制文本长度
-        display_text = content.get_display_text(200)
+        # 获取文本长度限制（0表示不限制）
+        content_length = bot.get_config('setting', {}).get('contentPreviewLength', 0)
+        display_text = content.get_display_text(content_length)
         full_text = f"{header}\n\n{html.unescape(display_text)}"
         chain.text(full_text)
         
@@ -217,6 +225,8 @@ async def build_aggregated_message(content: UnifiedContent, data: MessageStructu
         return chain
         
     except Exception as e:
+        from .helper import debug_log
+        debug_log(f"构建聚合消息失败: {e}", force=True, bot_instance=bot)
         print(f"构建聚合消息失败: {e}")
         return Chain(data).text('消息构建失败')
 
@@ -249,6 +259,8 @@ async def download_media_file(url: str, cache_dir: str) -> Optional[str]:
         return None
         
     except Exception as e:
+        from .helper import debug_log
+        debug_log(f"下载媒体文件失败: {e}", force=True)
         print(f"下载媒体文件失败: {e}")
         return None
 
@@ -259,9 +271,14 @@ async def download_media_file(url: str, cache_dir: str) -> Optional[str]:
 async def aggregator_push_task(_):
     """聚合推送定时任务"""
     try:
+        # 添加定时任务执行日志
+        from .helper import debug_log
+        debug_log("执行聚合推送定时任务", bot_instance=bot)
+        
         # 获取所有启用的订阅
         enabled_subscriptions = aggregator_manager.get_enabled_subscriptions()
         if not enabled_subscriptions:
+            debug_log(f"没有启用的订阅，跳过推送", bot_instance=bot)
             return
         
         # 收集所有订阅的数据源ID
@@ -272,26 +289,64 @@ async def aggregator_push_task(_):
         if not all_datasource_ids:
             return
         
+        # 更新数据源信息（确保映射关系是最新的）
+        datasources = await get_all_datasources()
+        if datasources:
+            aggregator_manager.update_datasources(datasources)
+            debug_log(f"更新了 {len(datasources)} 个数据源信息用于映射", bot_instance=bot)
+            
+            # 更新现有订阅的数据源名称（向后兼容）
+            updated_count = 0
+            for group_key, subscription in aggregator_manager.subscriptions.items():
+                if 'datasource_names' not in subscription:
+                    datasource_names = []
+                    for uuid_id in subscription.get('datasource_ids', []):
+                        ds_info = aggregator_manager.datasources.get(uuid_id)
+                        if ds_info:
+                            nickname = ds_info.get('nickname', '未知数据源')
+                            datasource_names.append(nickname)
+                    
+                    if datasource_names:
+                        subscription['datasource_names'] = datasource_names
+                        updated_count += 1
+            
+            if updated_count > 0:
+                aggregator_manager._save_subscriptions()
+                debug_log(f"更新了 {updated_count} 个订阅的数据源名称", bot_instance=bot)
+        else:
+            debug_log("获取数据源信息失败，可能影响数据源匹配", bot_instance=bot)
+        
         # 获取聚合内容
+        from .helper import debug_log
+        debug_log(f"开始获取聚合内容，数据源数量: {len(all_datasource_ids)}", bot_instance=bot)
         raw_contents = await get_aggregated_content(list(all_datasource_ids))
         if not raw_contents:
+            debug_log("没有获取到内容，跳过推送", bot_instance=bot)
             return
         
+        debug_log(f"获取到 {len(raw_contents)} 条内容，开始处理", bot_instance=bot)
         # 处理每条内容
         for raw_data in raw_contents:
             await process_single_aggregated_content(raw_data, enabled_subscriptions)
             
     except Exception as e:
+        from .helper import debug_log
+        debug_log(f"聚合推送任务失败: {e}", force=True, bot_instance=bot)
         print(f"聚合推送任务失败: {e}")
 
 
 async def process_single_aggregated_content(raw_data: dict, subscriptions: List[dict]):
     """处理单条聚合内容"""
     try:
+        from .helper import debug_log
+        
         # 转换为统一格式
         content = adapt_content_to_unified(raw_data)
         if not content:
+            debug_log("内容转换失败，跳过", bot_instance=bot)
             return
+        
+        debug_log(f"处理内容: {content.content_id} 来自 {content.source_name}", bot_instance=bot)
         
         # 检查是否已推送过
         existing_record = AggregatorRecord.get_or_none(
@@ -299,20 +354,38 @@ async def process_single_aggregated_content(raw_data: dict, subscriptions: List[
             AggregatorRecord.platform == content.platform
         )
         if existing_record:
+            debug_log(f"内容已推送过，跳过: {content.content_id}", bot_instance=bot)
             return
         
         # 查找订阅了该数据源的群组
         target_subscriptions = []
+        debug_log(f"检查订阅匹配 - 内容source_id: {content.source_id}", bot_instance=bot)
+        debug_log(f"当前所有订阅: {[(sub.get('group_id'), sub.get('datasource_names', sub.get('datasource_ids'))) for sub in subscriptions]}", bot_instance=bot)
+        
         for sub in subscriptions:
-            if content.source_id in sub.get('datasource_ids', []):
+            # 优先使用datasource_names，如果没有则回退到datasource_ids（向后兼容）
+            subscription_names = sub.get('datasource_names', [])
+            subscription_ids = sub.get('datasource_ids', [])
+            
+            debug_log(f"检查订阅 {sub.get('group_id')}: names={subscription_names}, ids={subscription_ids}", bot_instance=bot)
+            
+            # 按名称匹配
+            if content.source_id in subscription_names:
                 target_subscriptions.append(sub)
+                debug_log(f"找到名称匹配订阅: {sub.get('group_id')}", bot_instance=bot)
+            # 向后兼容：如果没有names字段，尝试用ID匹配
+            elif not subscription_names and content.source_id in subscription_ids:
+                target_subscriptions.append(sub)
+                debug_log(f"找到ID匹配订阅: {sub.get('group_id')}", bot_instance=bot)
         
         if not target_subscriptions:
+            debug_log(f"没有群组订阅该数据源，跳过: {content.source_id} ({content.source_name})", bot_instance=bot)
             return
         
         # 内容屏蔽检查
         for regex in bot.get_config("block", []):
             if re.match(regex, html.unescape(content.text)) or re.search(regex, html.unescape(content.text)):
+                debug_log(f"内容触发屏蔽规则，跳过推送: {content.content_id}", bot_instance=bot)
                 await send_to_console_channel(
                     Chain().text(f'聚合内容触发屏蔽规则，跳过推送\n来源: {content.source_name}\nID: {content.content_id}')
                 )
@@ -346,8 +419,9 @@ async def process_single_aggregated_content(raw_data: dict, subscriptions: List[
                 if content.publish_time:
                     header += f"\n{content.publish_time.strftime('%Y-%m-%d %H:%M')}"
                 
-                # 使用与手动获取一致的文本处理方式
-                display_text = content.get_display_text(200)
+                # 获取文本长度限制（0表示不限制）
+                content_length = bot.get_config('setting', {}).get('contentPreviewLength', 0)
+                display_text = content.get_display_text(content_length)
                 full_text = f"{header}\n\n{html.unescape(display_text)}"
                 chain.text(full_text)
                 
@@ -377,6 +451,8 @@ async def process_single_aggregated_content(raw_data: dict, subscriptions: List[
                     await asyncio.sleep(bot.get_config('sendInterval'))
                     
             except Exception as e:
+                from .helper import debug_log
+                debug_log(f"发送到群组 {subscription['group_id']} 失败: {e}", force=True, bot_instance=bot)
                 print(f"发送到群组 {subscription['group_id']} 失败: {e}")
         
         if send_tasks:
@@ -387,4 +463,6 @@ async def process_single_aggregated_content(raw_data: dict, subscriptions: List[
         )
         
     except Exception as e:
+        from .helper import debug_log
+        debug_log(f"处理聚合内容失败: {e}", force=True, bot_instance=bot)
         print(f"处理聚合内容失败: {e}")

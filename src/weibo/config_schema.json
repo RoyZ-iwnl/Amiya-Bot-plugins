@@ -45,11 +45,11 @@
                 },
                 "contentPreviewLength": {
                     "title": "内容预览长度",
-                    "description": "推送时显示的文本内容最大长度",
+                    "description": "推送时显示的文本内容最大长度，0表示不限制长度",
                     "type": "integer",
-                    "default": 200,
-                    "minimum": 50,
-                    "maximum": 1000
+                    "default": 0,
+                    "minimum": 0,
+                    "maximum": 2000
                 }
             },
             "additionalProperties": false
