@@ -24,7 +24,7 @@ SERVER_CDN_BASE = 'https://server-cdn.ceobecanteen.top/api/v1/'
 CDN_BASE = 'https://cdn.ceobecanteen.top/'
 
 # 调试开关 - 从配置文件读取
-DEBUG_CEOBE_API = True  # 默认值，实际值从bot配置读取
+DEBUG_CEOBE_API = False  # 默认值，实际值从bot配置读取
 
 # 保持原有的headers.json路径用于兼容性
 #HEADERS_PATH = os.path.join(os.path.dirname(__file__), "headers.json")
