@@ -203,22 +203,57 @@ async def build_aggregated_message(content: UnifiedContent, data: MessageStructu
         full_text = f"{header}\n\n{html.unescape(display_text)}"
         chain.text(full_text)
         
-        # 处理媒体内容（下载图片）
+        # 处理媒体内容（下载图片/GIF）
         if content.media_urls:
             setting = attridict(bot.get_config('setting'))
             images_cache_dir = setting.get('imagesCache', 'log/aggregator')
             
-            # 下载并添加图片
+            # 分别处理图片和GIF
             image_paths = []
+            gif_paths = []
             max_images = bot.get_config('setting', {}).get('maxImagesPerPost', 9)
             media_urls = content.media_urls if max_images <= 0 else content.media_urls[:max_images]
-            for url in media_urls:  # 从配置读取图片数量上限（0表示不限制）
+            
+            for url in media_urls:
                 path = await download_media_file(url, images_cache_dir)
                 if path:
-                    image_paths.append(path)
+                    from .helper import is_gif_file
+                    if is_gif_file(path):
+                        # 检查是否允许发送GIF
+                        if bot.get_config('setting', {}).get('sendGIF', True):
+                            gif_paths.append(path)
+                    else:
+                        image_paths.append(path)
             
-            if image_paths:
+            # 处理图片拼接
+            if image_paths and bot.get_config('setting', {}).get('mergeImages', False):
+                from .helper import merge_images
+                merged_path, remaining_images = merge_images(image_paths, images_cache_dir, {
+                    'setting': bot.get_config('setting', {})
+                })
+                if merged_path:
+                    # 先发送拼接图片
+                    chain.image([merged_path])
+                    # 如果有剩余图片，也一起发送
+                    if remaining_images:
+                        chain.image(remaining_images)
+                else:
+                    chain.image(image_paths)  # 拼接失败，发送原图
+            elif image_paths:
                 chain.image(image_paths)
+            
+            # 处理GIF文件
+            if gif_paths:
+                # 检查是否为ComWeChat实例
+                if is_comwechat_instance(data.instance):
+                    from .helper import compress_gif_for_wechat
+                    for gif_path in gif_paths:
+                        compressed_path = await compress_gif_for_wechat(gif_path, images_cache_dir)
+                        if compressed_path:
+                            chain.face(compressed_path)
+                else:
+                    # 非ComWeChat实例，直接发送GIF作为图片
+                    chain.image(gif_paths)
         
         # 添加原文链接
         if content.source_url and not isinstance(data.instance, QQGuildBotInstance):
@@ -427,21 +462,57 @@ async def process_single_aggregated_content(raw_data: dict, subscriptions: List[
                 full_text = f"{header}\n\n{html.unescape(display_text)}"
                 chain.text(full_text)
                 
-                # 处理图片
+                # 处理媒体内容（下载图片/GIF）
                 if content.media_urls:
                     setting = attridict(bot.get_config('setting'))
                     cache_dir = setting.get('imagesCache', 'log/aggregator')
                     
+                    # 分别处理图片和GIF
                     image_paths = []
+                    gif_paths = []
                     max_images = bot.get_config('setting', {}).get('maxImagesPerPost', 9)
                     media_urls = content.media_urls if max_images <= 0 else content.media_urls[:max_images]
-                    for url in media_urls:  # 从配置读取图片数量上限（0表示不限制）
+                    
+                    for url in media_urls:
                         path = await download_media_file(url, cache_dir)
                         if path:
-                            image_paths.append(path)
+                            from .helper import is_gif_file
+                            if is_gif_file(path):
+                                # 检查是否允许发送GIF
+                                if bot.get_config('setting', {}).get('sendGIF', True):
+                                    gif_paths.append(path)
+                            else:
+                                image_paths.append(path)
                     
-                    if image_paths:
+                    # 处理图片拼接
+                    if image_paths and bot.get_config('setting', {}).get('mergeImages', False):
+                        from .helper import merge_images
+                        merged_path, remaining_images = merge_images(image_paths, cache_dir, {
+                            'setting': bot.get_config('setting', {})
+                        })
+                        if merged_path:
+                            # 先发送拼接图片
+                            chain.image([merged_path])
+                            # 如果有剩余图片，也一起发送
+                            if remaining_images:
+                                chain.image(remaining_images)
+                        else:
+                            chain.image(image_paths)  # 拼接失败，发送原图
+                    elif image_paths:
                         chain.image(image_paths)
+                    
+                    # 处理GIF文件
+                    if gif_paths:
+                        # 检查是否为ComWeChat实例
+                        if is_comwechat_instance(instance.instance):
+                            from .helper import compress_gif_for_wechat
+                            for gif_path in gif_paths:
+                                compressed_path = await compress_gif_for_wechat(gif_path, cache_dir)
+                                if compressed_path:
+                                    chain.face(compressed_path)
+                        else:
+                            # 非ComWeChat实例，直接发送GIF作为图片
+                            chain.image(gif_paths)
                 
                 # 添加原文链接
                 if content.source_url and not isinstance(instance.instance, QQGuildBotInstance):

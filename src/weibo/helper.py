@@ -8,8 +8,9 @@ import aiohttp
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime
+import math
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from amiyabot.network.download import download_async
 from amiyabot.network.httpRequests import http_requests
@@ -363,6 +364,25 @@ def adapt_content_to_unified(raw_data: Dict[str, Any]) -> Optional[UnifiedConten
         return None
 
 
+def is_gif_file(file_path: str) -> bool:
+    """检测文件是否为GIF格式"""
+    if not file_path:
+        return False
+    
+    # 先从文件扩展名判断
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == '.gif':
+        return True
+    
+    # 如果扩展名不明确，尝试读取文件头判断
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(6)
+            return header.startswith(b'GIF87a') or header.startswith(b'GIF89a')
+    except:
+        return False
+
+
 class AggregatorSubscriptionManager:
     """聚合推送订阅管理器 - 基于JSON文件"""
     
@@ -529,3 +549,391 @@ def initialize_aggregator_manager(bot_instance):
     if aggregator_manager is None:
         aggregator_manager = AggregatorSubscriptionManager(bot_instance=bot_instance)
     return aggregator_manager
+
+
+async def compress_gif_for_wechat(gif_path: str, cache_dir: str) -> Optional[str]:
+    """为WeChat压缩GIF文件"""
+    try:
+        if not os.path.exists(gif_path):
+            debug_log(f"GIF文件不存在: {gif_path}")
+            return None
+        
+        # 检查文件大小和尺寸
+        file_size = os.path.getsize(gif_path)
+        with Image.open(gif_path) as img:
+            width, height = img.size
+            
+            # 如果文件已经符合要求，直接返回
+            if width <= 1000 and file_size <= 10 * 1024 * 1024:  # 10MB
+                return gif_path
+            
+            # 计算新尺寸
+            if width > 1000:
+                ratio = 1000 / width
+                new_width = 1000
+                new_height = int(height * ratio)
+            else:
+                new_width, new_height = width, height
+            
+            # 生成压缩后的文件名
+            name = os.path.basename(gif_path)
+            name_without_ext = os.path.splitext(name)[0]
+            compressed_path = os.path.join(cache_dir, f"{name_without_ext}_compressed.gif")
+            create_dir(compressed_path, is_file=True)
+            
+            # 压缩GIF
+            frames = []
+            durations = []
+            
+            for frame_index in range(img.n_frames):
+                img.seek(frame_index)
+                frame = img.copy()
+                if frame.mode != 'RGBA':
+                    frame = frame.convert('RGBA')
+                
+                # 调整大小
+                frame = frame.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                frames.append(frame)
+                
+                # 获取帧持续时间
+                duration = img.info.get('duration', 100)
+                durations.append(duration)
+            
+            # 保存压缩后的GIF
+            if frames:
+                frames[0].save(
+                    compressed_path,
+                    save_all=True,
+                    append_images=frames[1:],
+                    duration=durations,
+                    loop=img.info.get('loop', 0),
+                    optimize=True
+                )
+                
+                debug_log(f"GIF压缩完成: {gif_path} -> {compressed_path}")
+                return compressed_path
+            
+    except Exception as e:
+        debug_log(f"GIF压缩失败: {e}", force=True)
+        return gif_path  # 压缩失败则返回原文件
+    
+    return None
+
+
+def check_dimensions_consistent(image_paths: List[str], tolerance_percent: float = 5.0) -> Optional[Tuple[int, int]]:
+    """检查图片尺寸是否一致（允许一定误差）"""
+    if not image_paths:
+        return None
+    
+    try:
+        # 获取第一张图片的尺寸作为基准
+        first_img = Image.open(image_paths[0])
+        base_width, base_height = first_img.size
+        first_img.close()
+        
+        # 计算允许的误差范围
+        width_tolerance = int(base_width * tolerance_percent / 100)
+        height_tolerance = int(base_height * tolerance_percent / 100)
+        
+        debug_log(f"基准尺寸: {base_width}x{base_height}, 允许误差: ±{width_tolerance}x{height_tolerance}")
+        
+        # 检查其他图片是否在误差范围内
+        for i, path in enumerate(image_paths[1:], 1):
+            img = Image.open(path)
+            width, height = img.size
+            img.close()
+            
+            width_diff = abs(width - base_width)
+            height_diff = abs(height - base_height)
+            
+            if width_diff > width_tolerance or height_diff > height_tolerance:
+                debug_log(f"图片{i+1}尺寸不匹配: {width}x{height}, 误差: {width_diff}x{height_diff}")
+                return None
+        
+        debug_log(f"所有图片尺寸通过一致性检查")
+        return (base_width, base_height)
+        
+    except Exception as e:
+        debug_log(f"检查图片尺寸一致性失败: {e}")
+        return None
+
+
+def can_crop_to_fit(img_path: str, target_size: Tuple[int, int], tolerance_percent: float = 5.0) -> bool:
+    """检查图片是否可以裁剪适配目标尺寸"""
+    try:
+        img = Image.open(img_path)
+        width, height = img.size
+        img.close()
+        
+        target_width, target_height = target_size
+        width_tolerance = int(target_width * tolerance_percent / 100)
+        
+        # 检查宽度是否匹配（允许误差），且高度足够
+        width_match = abs(width - target_width) <= width_tolerance
+        height_enough = height >= target_height
+        
+        return width_match and height_enough
+        
+    except Exception as e:
+        debug_log(f"检查裁剪适配失败: {e}")
+        return False
+
+
+def find_consistent_image_group_with_crop(image_paths: List[str], tolerance_percent: float = 5.0) -> Tuple[Optional[Tuple[int, int]], List[str], List[str], List[str]]:
+    """找到尺寸一致的图片组，支持第9张长图裁剪，返回(基准尺寸, 一致图片列表, 可裁剪图片列表, 异常图片列表)"""
+    if not image_paths:
+        return None, [], [], []
+    
+    try:
+        # 获取第一张图片的尺寸作为基准
+        first_img = Image.open(image_paths[0])
+        base_width, base_height = first_img.size
+        first_img.close()
+        
+        # 计算允许的误差范围
+        width_tolerance = int(base_width * tolerance_percent / 100)
+        height_tolerance = int(base_height * tolerance_percent / 100)
+        
+        consistent_images = [image_paths[0]]  # 第一张图片作为基准
+        croppable_images = []  # 可裁剪的图片（如第9张长图）
+        inconsistent_images = []
+        
+        # 检查其他图片
+        for i, path in enumerate(image_paths[1:], 1):
+            img = Image.open(path)
+            width, height = img.size
+            img.close()
+            
+            width_diff = abs(width - base_width)
+            height_diff = abs(height - base_height)
+            
+            if width_diff <= width_tolerance and height_diff <= height_tolerance:
+                # 尺寸完全一致
+                consistent_images.append(path)
+            elif (width_diff <= width_tolerance and height >= base_height and 
+                  len(consistent_images) >= 8 and len(croppable_images) == 0):
+                # 宽度匹配，高度足够，且已有8张一致图片，这张可以作为第9张裁剪
+                croppable_images.append(path)
+                debug_log(f"图片{i+1}可裁剪适配: {width}x{height} -> {base_width}x{base_height}")
+            else:
+                inconsistent_images.append(path)
+                debug_log(f"图片{i+1}尺寸不匹配: {width}x{height}, 误差: {width_diff}x{height_diff}")
+        
+        debug_log(f"找到{len(consistent_images)}张一致图片, {len(croppable_images)}张可裁剪图片, {len(inconsistent_images)}张异常图片")
+        return (base_width, base_height), consistent_images, croppable_images, inconsistent_images
+        
+    except Exception as e:
+        debug_log(f"分析图片组失败: {e}")
+        return None, [], [], image_paths
+
+
+def crop_image_to_fit(img_path: str, target_size: Tuple[int, int]) -> Optional[Image.Image]:
+    """裁剪图片适配目标尺寸（从顶部开始裁剪）"""
+    try:
+        img = Image.open(img_path)
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        target_width, target_height = target_size
+        current_width, current_height = img.size
+        
+        # 如果需要调整宽度，先调整
+        if current_width != target_width:
+            # 保持纵横比调整到目标宽度
+            ratio = target_width / current_width
+            new_height = int(current_height * ratio)
+            img = img.resize((target_width, new_height), Image.Resampling.LANCZOS)
+            current_height = new_height
+        
+        # 从顶部裁剪到目标高度
+        if current_height > target_height:
+            img = img.crop((0, 0, target_width, target_height))
+        
+        debug_log(f"图片裁剪完成: 目标尺寸{target_size}")
+        return img
+        
+    except Exception as e:
+        debug_log(f"图片裁剪失败: {e}")
+        return None
+
+
+def merge_images(image_paths: List[str], cache_dir: str, bot_config: dict = None) -> Tuple[Optional[str], List[str]]:
+    """拼接多张图片 - 支持第9张长图裁剪"""
+    try:
+        if len(image_paths) < 3:
+            return None, image_paths
+        
+        # 从配置获取容忍度
+        tolerance = 5.0
+        if bot_config:
+            tolerance = bot_config.get('setting', {}).get('mergeTolerance', 5.0)
+        
+        # 找到尺寸一致的图片组，支持第9张裁剪
+        base_size, consistent_images, croppable_images, inconsistent_images = find_consistent_image_group_with_crop(
+            image_paths, tolerance_percent=tolerance
+        )
+        
+        if not base_size or len(consistent_images) < 3:
+            debug_log("没有足够的一致尺寸图片进行拼接")
+            return None, image_paths
+        
+        # 加载一致尺寸的图片
+        images = []
+        used_paths = []
+        
+        # 加载一致图片
+        for path in consistent_images:
+            if os.path.exists(path):
+                img = Image.open(path)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # 如果尺寸不完全一致，调整到目标尺寸
+                if img.size != base_size:
+                    img = img.resize(base_size, Image.Resampling.LANCZOS)
+                
+                images.append(img)
+                used_paths.append(path)
+        
+        # 如果有8张一致图片且有可裁剪的第9张，进行裁剪处理
+        if len(images) >= 8 and croppable_images:
+            croppable_path = croppable_images[0]  # 取第一张可裁剪的
+            cropped_img = crop_image_to_fit(croppable_path, base_size)
+            if cropped_img:
+                images.append(cropped_img)
+                used_paths.append(croppable_path)
+                debug_log(f"第9张图片裁剪成功，创建完整9宫格")
+        
+        if len(images) < 3:
+            return None, image_paths
+        
+        # 按优先级尝试拼接
+        merged = None
+        merge_type = ""
+        used_count = 0
+        
+        # 9宫格：至少8张图片（支持第9张裁剪）
+        if len(images) >= 8:
+            merged = merge_9_grid_consistent(images, base_size)
+            if merged:
+                merge_type = "9宫格"
+                used_count = min(9, len(images))
+        
+        # 6宫格：至少5张图片
+        if not merged and len(images) >= 5:
+            merged = merge_6_grid_consistent(images, base_size)
+            if merged:
+                merge_type = "6宫格"
+                used_count = min(6, len(images))
+        
+        # 3图横排：恰好3张图片
+        if not merged and len(images) == 3:
+            merged = merge_3_horizontal_consistent(images, base_size)
+            if merged:
+                merge_type = "3图横排"
+                used_count = 3
+        
+        # 关闭所有图片对象
+        for img in images:
+            img.close()
+        
+        if merged:
+            # 保存拼接后的图片
+            timestamp = int(time.time())
+            merged_path = os.path.join(cache_dir, f"merged_{timestamp}_{merge_type}.jpg")
+            create_dir(merged_path, is_file=True)
+            merged.save(merged_path, 'JPEG', quality=85)
+            debug_log(f"图片拼接完成({merge_type}): {merged_path}")
+            
+            # 计算剩余图片：
+            # 1. 未使用的一致图片
+            remaining_consistent = consistent_images[used_count:] if used_count < len(consistent_images) else []
+            # 2. 未使用的可裁剪图片（原始完整版本）
+            remaining_croppable = croppable_images[1:] if len(croppable_images) > 1 else []
+            if len(images) >= 9 and croppable_images:
+                # 如果第9张被用于裁剪，则原始完整版本也要包含在剩余图片中
+                remaining_croppable = croppable_images  
+            # 3. 所有异常图片
+            remaining_images = remaining_consistent + remaining_croppable + inconsistent_images
+            
+            debug_log(f"剩余图片数量: {len(remaining_images)}")
+            return merged_path, remaining_images
+        else:
+            debug_log("未满足拼接条件")
+            return None, image_paths
+        
+    except Exception as e:
+        debug_log(f"图片拼接失败: {e}", force=True)
+        return None, image_paths
+
+
+def merge_3_horizontal_consistent(images: List[Image.Image], base_size: Tuple[int, int]) -> Optional[Image.Image]:
+    """3张同尺寸图片横向拼接"""
+    try:
+        if len(images) != 3:
+            return None
+            
+        width, height = base_size
+        
+        # 创建拼接后的图片
+        merged = Image.new('RGB', (width * 3, height), (255, 255, 255))
+        
+        for i, img in enumerate(images[:3]):
+            x_offset = i * width
+            merged.paste(img, (x_offset, 0))
+        
+        return merged
+        
+    except Exception as e:
+        debug_log(f"3图横向拼接失败: {e}")
+        return None
+
+
+def merge_6_grid_consistent(images: List[Image.Image], base_size: Tuple[int, int]) -> Optional[Image.Image]:
+    """6张同尺寸图片网格拼接 (2x3)"""
+    try:
+        if len(images) < 5:
+            return None
+            
+        width, height = base_size
+        
+        # 创建2x3网格
+        merged = Image.new('RGB', (width * 3, height * 2), (255, 255, 255))
+        
+        for i in range(min(6, len(images))):
+            row = i // 3
+            col = i % 3
+            x = col * width
+            y = row * height
+            merged.paste(images[i], (x, y))
+        
+        return merged
+        
+    except Exception as e:
+        debug_log(f"6宫格拼接失败: {e}")
+        return None
+
+
+def merge_9_grid_consistent(images: List[Image.Image], base_size: Tuple[int, int]) -> Optional[Image.Image]:
+    """9张同尺寸图片网格拼接 (3x3)"""
+    try:
+        if len(images) < 8:
+            return None
+            
+        width, height = base_size
+        
+        # 创建3x3网格
+        merged = Image.new('RGB', (width * 3, height * 3), (255, 255, 255))
+        
+        for i in range(min(9, len(images))):
+            row = i // 3
+            col = i % 3
+            x = col * width
+            y = row * height
+            merged.paste(images[i], (x, y))
+        
+        return merged
+        
+    except Exception as e:
+        debug_log(f"9宫格拼接失败: {e}")
+        return None

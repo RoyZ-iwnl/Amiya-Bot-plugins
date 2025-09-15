@@ -50,6 +50,26 @@
                     "default": 0,
                     "minimum": 0,
                     "maximum": 2000
+                },
+                "sendGIF": {
+                    "title": "发送GIF",
+                    "description": "是否允许发送GIF动图",
+                    "type": "boolean",
+                    "default": true
+                },
+                "mergeImages": {
+                    "title": "图片拼接",
+                    "description": "是否启用多图片拼接功能",
+                    "type": "boolean",
+                    "default": false
+                },
+                "mergeTolerance": {
+                    "title": "拼接尺寸容忍度",
+                    "description": "图片拼接时允许的尺寸误差百分比",
+                    "type": "number",
+                    "default": 5.0,
+                    "minimum": 0.0,
+                    "maximum": 20.0
                 }
             },
             "additionalProperties": false
