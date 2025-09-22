@@ -227,16 +227,53 @@ async def build_aggregated_message(content: UnifiedContent, data: MessageStructu
             
             # 处理图片拼接
             if image_paths and bot.get_config('setting', {}).get('mergeImages', False):
-                from .helper import merge_images
+                from .helper import merge_images, merge_remaining_long_strips, merge_square_like_images
                 merged_path, remaining_images = merge_images(image_paths, images_cache_dir, {
                     'setting': bot.get_config('setting', {})
                 })
                 if merged_path:
                     # 先发送拼接图片
                     chain.image([merged_path])
-                    # 如果有剩余图片，也一起发送
+                    # 对剩余图片中的长条图进行左右拼接
                     if remaining_images:
-                        chain.image(remaining_images)
+                        long_strips_merged, final_remaining = merge_remaining_long_strips(
+                            remaining_images, images_cache_dir,
+                            aspect_ratio_threshold=bot.get_config('setting', {}).get('longStripThreshold', 1.5),
+                            max_width=bot.get_config('setting', {}).get('maxMergedWidth', 2000)
+                        )
+                        if long_strips_merged:
+                            # 发送长条图拼接结果
+                            chain.image([long_strips_merged])
+                            # 对剩余图片中的1:1图片进行拼接
+                            if final_remaining:
+                                square_merged, truly_final_remaining = merge_square_like_images(
+                                    final_remaining, images_cache_dir,
+                                    tolerance_percent=bot.get_config('setting', {}).get('mergeTolerance', 5.0)
+                                )
+                                if square_merged:
+                                    # 发送1:1图片拼接结果
+                                    chain.image([square_merged])
+                                    # 如果还有剩余图片，也发送
+                                    if truly_final_remaining:
+                                        chain.image(truly_final_remaining)
+                                else:
+                                    # 没有1:1图片拼接，直接发送剩余图片
+                                    chain.image(final_remaining)
+                        else:
+                            # 没有长条图拼接，尝试1:1图片拼接
+                            square_merged, final_remaining = merge_square_like_images(
+                                remaining_images, images_cache_dir,
+                                tolerance_percent=bot.get_config('setting', {}).get('mergeTolerance', 5.0)
+                            )
+                            if square_merged:
+                                # 发送1:1图片拼接结果
+                                chain.image([square_merged])
+                                # 如果还有剩余图片，也发送
+                                if final_remaining:
+                                    chain.image(final_remaining)
+                            else:
+                                # 没有任何拼接，直接发送剩余图片
+                                chain.image(remaining_images)
                 else:
                     chain.image(image_paths)  # 拼接失败，发送原图
             elif image_paths:
@@ -486,16 +523,53 @@ async def process_single_aggregated_content(raw_data: dict, subscriptions: List[
                     
                     # 处理图片拼接
                     if image_paths and bot.get_config('setting', {}).get('mergeImages', False):
-                        from .helper import merge_images
+                        from .helper import merge_images, merge_remaining_long_strips, merge_square_like_images
                         merged_path, remaining_images = merge_images(image_paths, cache_dir, {
                             'setting': bot.get_config('setting', {})
                         })
                         if merged_path:
                             # 先发送拼接图片
                             chain.image([merged_path])
-                            # 如果有剩余图片，也一起发送
+                            # 对剩余图片中的长条图进行左右拼接
                             if remaining_images:
-                                chain.image(remaining_images)
+                                long_strips_merged, final_remaining = merge_remaining_long_strips(
+                                    remaining_images, cache_dir,
+                                    aspect_ratio_threshold=bot.get_config('setting', {}).get('longStripThreshold', 1.5),
+                                    max_width=bot.get_config('setting', {}).get('maxMergedWidth', 2000)
+                                )
+                                if long_strips_merged:
+                                    # 发送长条图拼接结果
+                                    chain.image([long_strips_merged])
+                                    # 对剩余图片中的1:1图片进行拼接
+                                    if final_remaining:
+                                        square_merged, truly_final_remaining = merge_square_like_images(
+                                            final_remaining, cache_dir,
+                                            tolerance_percent=bot.get_config('setting', {}).get('mergeTolerance', 5.0)
+                                        )
+                                        if square_merged:
+                                            # 发送1:1图片拼接结果
+                                            chain.image([square_merged])
+                                            # 如果还有剩余图片，也发送
+                                            if truly_final_remaining:
+                                                chain.image(truly_final_remaining)
+                                        else:
+                                            # 没有1:1图片拼接，直接发送剩余图片
+                                            chain.image(final_remaining)
+                                else:
+                                    # 没有长条图拼接，尝试1:1图片拼接
+                                    square_merged, final_remaining = merge_square_like_images(
+                                        remaining_images, cache_dir,
+                                        tolerance_percent=bot.get_config('setting', {}).get('mergeTolerance', 5.0)
+                                    )
+                                    if square_merged:
+                                        # 发送1:1图片拼接结果
+                                        chain.image([square_merged])
+                                        # 如果还有剩余图片，也发送
+                                        if final_remaining:
+                                            chain.image(final_remaining)
+                                    else:
+                                        # 没有任何拼接，直接发送剩余图片
+                                        chain.image(remaining_images)
                         else:
                             chain.image(image_paths)  # 拼接失败，发送原图
                     elif image_paths:

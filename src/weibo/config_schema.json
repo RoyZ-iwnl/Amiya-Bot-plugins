@@ -70,6 +70,22 @@
                     "default": 5.0,
                     "minimum": 0.0,
                     "maximum": 20.0
+                },
+                "longStripThreshold": {
+                    "title": "长条图判定阈值",
+                    "description": "判定为长条图的高宽比阈值（高度/宽度）",
+                    "type": "number",
+                    "default": 1.5,
+                    "minimum": 1.0,
+                    "maximum": 5.0
+                },
+                "maxMergedWidth": {
+                    "title": "拼接图片最大宽度",
+                    "description": "长条图拼接后的最大宽度限制（像素）",
+                    "type": "integer",
+                    "default": 2000,
+                    "minimum": 500,
+                    "maximum": 5000
                 }
             },
             "additionalProperties": false

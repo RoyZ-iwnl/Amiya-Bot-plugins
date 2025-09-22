@@ -9,6 +9,9 @@ setting:
     sendGIF: true  # 是否发送GIF动图
     mergeImages: false  # 是否启用图片拼接功能
     mergeTolerance: 5.0  # 图片拼接尺寸容忍度（百分比）
+    # 长条图拼接相关配置
+    longStripThreshold: 1.5  # 长条图判定阈值（高度/宽度比例）
+    maxMergedWidth: 2000  # 拼接后图片的最大宽度限制
 
 sendInterval: 0.5  # 发送间隔
 sendAsync: false   # 是否异步发送
