@@ -1,0 +1,150 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": [],
+    "properties": {
+        "setting": {
+            "title": "聚合推送设置",
+            "type": "object",
+            "properties": {
+                "checkRate": {
+                    "title": "检查频率",
+                    "description": "每隔一定时间检查新内容的频率，单位秒",
+                    "type": "integer",
+                    "default": 60,
+                    "minimum": 30
+                },
+                "imagesCache": {
+                    "title": "图片缓存目录",
+                    "description": "内容图片缓存的目录，可以为绝对路径",
+                    "type": "string",
+                    "default": "log/aggregator"
+                },
+                "debugCeobeAPI": {
+                    "title": "调试模式",
+                    "description": "开启后会输出详细的API调用和处理信息",
+                    "type": "boolean",
+                    "default": false
+                },
+                "enableAggregator": {
+                    "title": "启用聚合推送",
+                    "description": "是否启用聚合推送功能",
+                    "type": "boolean",
+                    "default": true
+                },
+                "maxImagesPerPost": {
+                    "title": "每条内容最大图片数",
+                    "description": "单条内容推送时包含的最大图片数量",
+                    "type": "integer",
+                    "default": 9,
+                    "minimum": 0,
+                    "maximum": 999
+                },
+                "contentPreviewLength": {
+                    "title": "内容预览长度",
+                    "description": "推送时显示的文本内容最大长度，0表示不限制长度",
+                    "type": "integer",
+                    "default": 0,
+                    "minimum": 0,
+                    "maximum": 2000
+                },
+                "sendGIF": {
+                    "title": "发送GIF",
+                    "description": "是否允许发送GIF动图",
+                    "type": "boolean",
+                    "default": true
+                },
+                "mergeImages": {
+                    "title": "图片拼接",
+                    "description": "是否启用多图片拼接功能",
+                    "type": "boolean",
+                    "default": false
+                },
+                "mergeTolerance": {
+                    "title": "拼接尺寸容忍度",
+                    "description": "图片拼接时允许的尺寸误差百分比",
+                    "type": "number",
+                    "default": 5.0,
+                    "minimum": 0.0,
+                    "maximum": 20.0
+                },
+                "longStripThreshold": {
+                    "title": "长条图判定阈值",
+                    "description": "判定为长条图的高宽比阈值（高度/宽度）",
+                    "type": "number",
+                    "default": 1.5,
+                    "minimum": 1.0,
+                    "maximum": 5.0
+                },
+                "maxMergedWidth": {
+                    "title": "拼接图片最大宽度",
+                    "description": "长条图拼接后的最大宽度限制（像素）",
+                    "type": "integer",
+                    "default": 2000,
+                    "minimum": 500,
+                    "maximum": 5000
+                }
+            },
+            "additionalProperties": false
+        },
+        "sendInterval": {
+            "title": "发送间隔",
+            "description": "批量发送时每条消息之间的间隔时间，单位秒",
+            "type": "number",
+            "default": 0.5,
+            "minimum": 0
+        },
+        "sendAsync": {
+            "title": "异步发送",
+            "description": "是否开启异步发送（同时发送到多个群组）",
+            "type": "boolean",
+            "default": false
+        },
+        "block": {
+            "title": "内容屏蔽规则",
+            "description": "用于屏蔽特定内容的正则表达式列表",
+            "type": "array",
+            "items": {
+                "type": "string",
+                "description": "正则表达式"
+            },
+            "default": []
+        },
+        "aggregator": {
+            "title": "聚合推送高级配置",
+            "type": "object",
+            "properties": {
+                "subscriptionFile": {
+                    "title": "订阅配置文件",
+                    "description": "存储群组订阅信息的JSON文件名",
+                    "type": "string",
+                    "default": "aggregator_subscriptions.json"
+                },
+                "supportedPlatforms": {
+                    "title": "支持的平台",
+                    "description": "支持订阅的内容平台列表",
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "weibo",
+                            "bilibili", 
+                            "netease-cloud-music",
+                            "arknights-game",
+                            "arknights-website"
+                        ]
+                    },
+                    "default": [
+                        "weibo",
+                        "bilibili",
+                        "netease-cloud-music", 
+                        "arknights-game",
+                        "arknights-website"
+                    ]
+                }
+            },
+            "additionalProperties": false
+        }
+    },
+    "additionalProperties": false
+}

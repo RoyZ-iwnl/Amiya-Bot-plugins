@@ -1,626 +1,402 @@
-import os
-import html
 import time
 import asyncio
 import re
+import json
+from typing import Optional, List
+from pathlib import Path
+
 from amiyabot import QQGuildBotInstance
-from amiyabot.builtin.message import MessageStructure
+from amiyabot.factory import BotHandlerFactory
 from amiyabot.adapters.tencent.qqGroup import QQGroupBotInstance
+from amiyabot.network.download import download_async
+
 from core.database.group import GroupSetting
 from core.database.messages import *
-from core.util import TimeRecorder
-from core import send_to_console_channel, Message, Chain, AmiyaBotPluginInstance, bot as main_bot
+
+from core.util import TimeRecorder, find_most_similar
+from core import (
+    send_to_console_channel,
+    Message,
+    Chain,
+    AmiyaBotPluginInstance,
+    bot as main_bot,
+)
 
 try:
     from core.util import attridict
 except ImportError:
     from core.util import AttrDict as attridict
 
-from .helper import get_all_datasources, get_aggregated_content, adapt_content_to_unified, initialize_aggregator_manager, UnifiedContent
+from .helper import WeiboWebSocketManager
 
-curr_dir = os.path.dirname(__file__)
+curr_dir = Path(__file__).parent
+
 
 class WeiboPluginInstance(AmiyaBotPluginInstance): ...
 
+
 bot = WeiboPluginInstance(
-    name='CeobeAPI聚合推送',
+    name='明日方舟微博推送',
     version='4.0',
-    plugin_id='royz-arknights-aggregator',
-    plugin_type='',
-    description='基于CeobeAPI的多平台聚合推送系统',
+    plugin_id='amiyabot-weibo',
+    plugin_type='official',
+    description='在明日方舟相关官微更新时自动推送到群',
     document=f'{curr_dir}/README.md',
     instruction=f'{curr_dir}/README_USE.md',
     global_config_schema=f'{curr_dir}/config_schema.json',
     global_config_default=f'{curr_dir}/config_default.yaml',
 )
 
-# 初始化订阅管理器
-aggregator_manager = initialize_aggregator_manager(bot)
 
 @table
-class AggregatorRecord(MessageBaseModel):
-    """聚合推送记录 - 防止重复推送"""
-    content_id: str = CharField()       # 内容唯一ID
-    platform: str = CharField()        # 平台类型
-    datasource_id: str = CharField()    # 数据源ID
-    record_time: int = IntegerField()   # 记录时间
+class WeiboRecord(MessageBaseModel):
+    user_id: str = CharField()
+    blog_id: str = CharField()
+    record_time: int = IntegerField()
+    user_name: str = CharField(null=True)
+    content: str = TextField(null=True)
+    images: str = TextField(null=True)  # JSON格式存储图片URL列表
+    detail_url: str = CharField(null=True)
+    created_at: str = CharField(null=True)
 
-def is_comwechat_instance(instance):
-    """检测是否为ComWeChat实例"""
-    return str(instance) == 'ComWeChat'
+    @staticmethod
+    def get_weibo_list(user_id: str, limit: Optional[int] = 10):
+        query = (
+            WeiboRecord.select()
+            .where(WeiboRecord.user_id == user_id)
+            .order_by(WeiboRecord.record_time.desc())
+        )
+        if limit:
+            query = query.limit(limit)
+        return list(query)  # 转换为列表
 
-def parse_user_selection(text: str, max_count: int) -> List[int]:
-    """解析用户选择的序号列表（支持逗号分隔的多选）"""
-    indices = []
-    # 提取所有数字
-    numbers = re.findall(r'\d+', text)
-    
-    for num_str in numbers:
-        try:
-            num = int(num_str)
-            if 1 <= num <= max_count:
-                indices.append(num)
-        except ValueError:
-            continue
-    
-    return list(set(indices))  # 去重
 
-# ========== 聚合推送系统命令 ==========
+# 全局WebSocket管理器
+ws_manager = WeiboWebSocketManager(config_provider=bot)
 
-@bot.on_message(group_id='aggregator', keywords=['开启聚合推送'])
-async def enable_aggregator_push(data: Message):
-    """开启聚合推送"""
+
+@ws_manager.register_message_handler("historical_weibos")
+async def handle_weibo(data: dict):
+    """处理订阅建立后返回的微博列表"""
+    if not data:
+        return
+
+    recent_weibos: dict = data.get('recent_weibos') or {}
+    if not recent_weibos:
+        return
+
+    # 创建异步任务来处理微博数据，不等待处理完成
+    asyncio.create_task(process_weibo_data(recent_weibos))
+
+
+async def process_weibo_data(recent_weibos: dict):
+    """异步处理微博数据的函数，避免阻塞websocket"""
+    try:
+        # 查询开启微博推送的群（后面可能需要推送新增的历史微博）
+        target_groups: List[GroupSetting] = list(
+            GroupSetting.select().where(GroupSetting.send_weibo == 1)
+        )
+
+        setting = attridict(bot.get_config('setting'))
+        push_async = bot.get_config('sendAsync')
+        send_interval = bot.get_config('sendInterval')
+        block_rules = bot.get_config('block') or []
+
+        inserted_records = []  # 保存本次新增的微博（结构：dict）
+        for uid, items in recent_weibos.items():
+            if not items:
+                continue
+            for wb in items:
+                blog_id = wb.get('id') or wb.get('bid')
+                if not blog_id:
+                    continue
+                if WeiboRecord.get_or_none(blog_id=blog_id):
+                    continue  # 已存在，跳过
+
+                pics_files = []
+                for p in wb.get('pics', []) or []:
+                    file = p.get('file')
+                    if file:
+                        suffix = file.split('.')[-1]
+                        if (
+                            setting.get('sendGIF', False) is False
+                            and suffix.lower() == 'gif'
+                        ):
+                            continue
+                        try:
+                            pic_index = p.get('index', '')
+                            cdn_url = f"https://cdn.amiyabot.com/api/v1/weibo/pic/{pic_index}/{file}"
+
+                            # 创建cache目录（使用运行路径）
+                            cache_dir = Path.cwd() / setting.get(
+                                'imagesCache', 'logs/weibo'
+                            )
+                            cache_dir.mkdir(parents=True, exist_ok=True)
+
+                            # 判断文件是否已经存在
+                            local_file_path = cache_dir / file
+                            if local_file_path.exists():
+                                pics_files.append(str(local_file_path))
+                                continue
+                            # 下载文件
+                            file_content = await download_async(cdn_url)
+                            if file_content:
+                                # 保存文件到cache目录
+                                local_file_path.write_bytes(file_content)
+                                pics_files.append(str(local_file_path))
+                        except Exception as _:
+                            continue
+
+                images_json = json.dumps(pics_files) if pics_files else ''
+
+                record = WeiboRecord.create(
+                    user_id=uid,
+                    blog_id=blog_id,
+                    record_time=int(time.time()),
+                    user_name=wb.get('screen_name', ''),
+                    content=wb.get('text', ''),
+                    images=images_json,
+                    detail_url=f"https://weibo.com/{uid}/{blog_id}",
+                    created_at=wb.get('created_at', ''),
+                )
+                inserted_records.append((uid, wb, record))
+
+        if not inserted_records:
+            return
+
+        if not target_groups:
+            return  # 没有需要推送的群
+
+        # 推送新增的历史微博（简单文本+详情+图片文件名列表）
+        async_tasks = []
+        time_rec = TimeRecorder()
+
+        for uid, wb, record in inserted_records:
+            # 屏蔽规则匹配正文
+            skip = False
+            text_content = wb.get('text', '')
+            for regex in block_rules:
+                try:
+                    if re.match(regex, text_content) or re.search(regex, text_content):
+                        skip = True
+                        break
+                except re.error:
+                    continue
+            if skip:
+                await send_to_console_channel(
+                    Chain().text(f"微博触发屏蔽规则，跳过推送: {record.blog_id}")
+                )
+                continue
+
+            # 构建消息内容（按需求格式）
+            header = f"来自 {wb.get('screen_name','')} 的最新微博\n\n{text_content}"
+            images = json.loads(record.images) if record.images else []
+            url = record.detail_url
+
+            await send_to_console_channel(
+                Chain().text(
+                    f"开始推送微博\nUSER: {record.user_name}\nID: {record.blog_id}\n目标数: {len(target_groups)}"
+                )
+            )
+            for group in target_groups:
+                bot_instance = main_bot[group.bot_id]
+                if not bot_instance:
+                    continue
+                chain = Chain().text(header)
+
+                if isinstance(bot_instance.instance, QQGuildBotInstance):
+                    chain.image(images)
+                else:
+                    chain.image(images).text(f'\n\n{url}')
+
+                if push_async:
+                    async_tasks.append(
+                        bot_instance.send_message(chain, channel_id=group.group_id)
+                    )
+                else:
+                    await bot_instance.send_message(chain, channel_id=group.group_id)
+                    await asyncio.sleep(send_interval)
+
+        if async_tasks:
+            await asyncio.wait(async_tasks)
+
+        await send_to_console_channel(
+            Chain().text(
+                f"微博推送完成：{len(inserted_records)} 条 耗时 {time_rec.total()}"
+            )
+        )
+    except Exception as e:
+        # 捕获并记录异常，避免未处理的异常导致任务崩溃
+        await send_to_console_channel(
+            Chain().text(f"处理微博数据时发生错误: {str(e)}")
+        )
+
+
+async def send_by_index(index: int, weibo: str, data: Message, blog_list=None):
+    """发送指定序号的历史微博"""
+    try:
+        if blog_list is None:
+            blog_list = WeiboRecord.get_weibo_list(weibo, limit=10)
+
+        if not blog_list:
+            return Chain(data).text('博士...暂时没有找到历史微博呢...')
+
+        # 验证索引
+        if index < 1:
+            index = 1
+        elif index > len(blog_list):
+            index = len(blog_list)
+
+        # 获取指定序号的微博
+        target_blog = blog_list[index - 1]
+        blog_id = target_blog.blog_id  # 使用属性访问而不是字典访问
+
+        # 从数据库获取微博内容
+        result = WeiboRecord.get_or_none(blog_id=blog_id)
+
+        if not result:
+            return Chain(data).text('博士...暂时无法获取这条微博的内容呢...')
+
+        # 构建回复
+        chain = (
+            Chain(data)
+            .text(result.user_name + '\n')
+            .text(result.content + '\n')
+            .image(json.loads(result.images) if result.images else [])
+        )
+
+        if not isinstance(data.instance, QQGuildBotInstance):
+            chain.text(f'\n\n{result.detail_url}')
+
+        return chain
+
+    except Exception as e:
+        print(f"获取历史微博失败: {e}")
+        return Chain(data).text('博士...获取历史微博时出错了，请稍后再试吧~')
+
+
+@bot.on_message(group_id='weibo', keywords=['开启微博推送'])
+async def _(data: Message):
     if isinstance(data.instance, QQGroupBotInstance):
         return Chain(data).text('抱歉博士，该功能在群聊暂不可用~')
 
     if not data.is_admin:
-        return Chain(data).text('抱歉，聚合推送只能由管理员设置')
+        return Chain(data).text('抱歉，微博推送只能由管理员设置')
 
-    try:
-        # 获取所有数据源
-        datasources = await get_all_datasources()
-        if not datasources:
-            return Chain(data).text('获取数据源列表失败，请稍后重试')
-
-        # 更新订阅管理器的数据源信息
-        aggregator_manager.update_datasources(datasources)
-        
-        # 生成数据源选择菜单
-        supported_platforms = ['weibo', 'bilibili', 'netease-cloud-music', 'arknights-game', 'arknights-website']
-        menu_text, index_map = aggregator_manager.generate_datasource_menu(supported_platforms)
-        
-        if not index_map:
-            return Chain(data).text('暂无可用数据源')
-        
-        # 发送选择菜单
-        reply = Chain(data).text(f"CeobeAPI聚合推送设置\n\n{menu_text}")
-        
-        # 等待用户选择
-        wait = await data.wait(reply)
-        if not wait:
-            return Chain(data).text('操作取消或超时，已取消设置')
-
-        # 解析用户选择
-        selected_indices = parse_user_selection(wait.text_digits, len(index_map))
-        if not selected_indices:
-            return Chain(data).text('未选择有效的数据源，已取消设置')
-
-        # 转换为数据源ID列表
-        selected_datasource_ids = [index_map[i] for i in selected_indices]
-        
-        # 添加订阅
-        success = aggregator_manager.add_subscription(
-            data.channel_id, 
-            data.instance.appid, 
-            selected_datasource_ids
-        )
-        
-        if success:
-            # 生成确认信息
-            selected_names = []
-            for ds_id in selected_datasource_ids:
-                ds_info = aggregator_manager.datasources.get(ds_id)
-                if ds_info:
-                    selected_names.append(f"{ds_info.get('nickname', '未知')}({ds_info.get('platform', '未知')})")
-            
-            confirm_text = f"已成功订阅 {len(selected_datasource_ids)} 个数据源：\n\n"
-            confirm_text += "\n".join(selected_names)
-            confirm_text += "\n\n聚合推送已在本群开启"
-            
-            return Chain(data).text(confirm_text)
-        else:
-            return Chain(data).text('订阅设置失败，请重试')
-
-    except Exception as e:
-        from .helper import debug_log
-        debug_log(f"开启聚合推送失败: {e}", force=True, bot_instance=bot)
-        print(f"开启聚合推送失败: {e}")
-        return Chain(data).text('设置失败，请检查日志或重试')
-
-
-@bot.on_message(group_id='aggregator', keywords=['关闭聚合推送'])
-async def disable_aggregator_push(data: Message):
-    """关闭聚合推送"""
-    if not data.is_admin:
-        return Chain(data).text('抱歉，聚合推送只能由管理员设置')
-
-    success = aggregator_manager.remove_subscription(data.channel_id, data.instance.appid)
-    
-    if success:
-        return Chain(data).text('已在本群关闭聚合推送')
+    channel: GroupSetting = GroupSetting.get_or_none(
+        group_id=data.channel_id, bot_id=data.instance.appid
+    )
+    if channel:
+        GroupSetting.update(send_weibo=1).where(
+            GroupSetting.group_id == data.channel_id,
+            GroupSetting.bot_id == data.instance.appid,
+        ).execute()
     else:
-        return Chain(data).text('本群未开启聚合推送或关闭失败')
-
-
-@bot.on_message(group_id='aggregator', keywords=['最新内容', '最新聚合'])
-async def get_latest_aggregated_content(data: Message):
-    """获取最新聚合内容"""
-    group_key = aggregator_manager._get_group_key(data.channel_id, data.instance.appid)
-    subscription = aggregator_manager.subscriptions.get(group_key)
-    
-    if not subscription or not subscription.get('enabled', False):
-        return Chain(data).text('本群未开启聚合推送，请先发送"兔兔开启聚合推送"进行设置')
-    
-    datasource_ids = subscription.get('datasource_ids', [])
-    if not datasource_ids:
-        return Chain(data).text('未订阅任何数据源')
-    
-    try:
-        # 获取最新内容
-        raw_contents = await get_aggregated_content(datasource_ids)
-        if not raw_contents:
-            return Chain(data).text('暂无最新内容')
-        
-        # 取第一条内容进行展示
-        raw_data = raw_contents[0]
-        content = adapt_content_to_unified(raw_data)
-        
-        if content:
-            return await build_aggregated_message(content, data)
+        if GroupSetting.get_or_none(group_id=data.channel_id):
+            GroupSetting.update(bot_id=data.instance.appid, send_weibo=1).where(
+                GroupSetting.group_id == data.channel_id
+            ).execute()
         else:
-            return Chain(data).text('内容处理失败')
-            
-    except Exception as e:
-        from .helper import debug_log
-        debug_log(f"获取最新聚合内容失败: {e}", force=True, bot_instance=bot)
-        print(f"获取最新聚合内容失败: {e}")
-        return Chain(data).text('获取失败，请检查日志或重试')
+            GroupSetting.create(
+                group_id=data.channel_id, bot_id=data.instance.appid, send_weibo=1
+            )
+
+    return Chain(data).text('已在本群开启微博推送')
 
 
-async def build_aggregated_message(content: UnifiedContent, data: MessageStructure) -> Chain:
-    """构建聚合内容消息"""
-    try:
-        chain = Chain(data)
-        
-        # 添加来源信息和文本内容
-        header = f"来自 {content.source_name} 的最新内容"
-        if content.publish_time:
-            header += f"\n时间: {content.publish_time.strftime('%Y-%m-%d %H:%M')}"
-        
-        # 获取文本长度限制（0表示不限制）
-        content_length = bot.get_config('setting', {}).get('contentPreviewLength', 0)
-        display_text = content.get_display_text(content_length)
-        full_text = f"{header}\n\n{html.unescape(display_text)}"
-        chain.text(full_text)
-        
-        # 处理媒体内容（下载图片/GIF）
-        if content.media_urls:
-            setting = attridict(bot.get_config('setting'))
-            images_cache_dir = setting.get('imagesCache', 'log/aggregator')
-            
-            # 分别处理图片和GIF
-            image_paths = []
-            gif_paths = []
-            max_images = bot.get_config('setting', {}).get('maxImagesPerPost', 9)
-            media_urls = content.media_urls if max_images <= 0 else content.media_urls[:max_images]
-            
-            for url in media_urls:
-                path = await download_media_file(url, images_cache_dir)
-                if path:
-                    from .helper import is_gif_file
-                    if is_gif_file(path):
-                        # 检查是否允许发送GIF
-                        if bot.get_config('setting', {}).get('sendGIF', True):
-                            gif_paths.append(path)
-                    else:
-                        image_paths.append(path)
-            
-            # 处理图片拼接
-            if image_paths and bot.get_config('setting', {}).get('mergeImages', False):
-                from .helper import merge_images, merge_remaining_long_strips, merge_square_like_images
-                merged_path, remaining_images = merge_images(image_paths, images_cache_dir, {
-                    'setting': bot.get_config('setting', {})
-                })
-                if merged_path:
-                    # 先发送拼接图片
-                    chain.image([merged_path])
-                    # 对剩余图片中的长条图进行左右拼接
-                    if remaining_images:
-                        long_strips_merged, final_remaining = merge_remaining_long_strips(
-                            remaining_images, images_cache_dir,
-                            aspect_ratio_threshold=bot.get_config('setting', {}).get('longStripThreshold', 1.5),
-                            max_width=bot.get_config('setting', {}).get('maxMergedWidth', 2000)
-                        )
-                        if long_strips_merged:
-                            # 发送长条图拼接结果
-                            chain.image([long_strips_merged])
-                            # 对剩余图片中的1:1图片进行拼接
-                            if final_remaining:
-                                square_merged, truly_final_remaining = merge_square_like_images(
-                                    final_remaining, images_cache_dir,
-                                    tolerance_percent=bot.get_config('setting', {}).get('mergeTolerance', 5.0)
-                                )
-                                if square_merged:
-                                    # 发送1:1图片拼接结果
-                                    chain.image([square_merged])
-                                    # 如果还有剩余图片，也发送
-                                    if truly_final_remaining:
-                                        chain.image(truly_final_remaining)
-                                else:
-                                    # 没有1:1图片拼接，直接发送剩余图片
-                                    chain.image(final_remaining)
-                        else:
-                            # 没有长条图拼接，尝试1:1图片拼接
-                            square_merged, final_remaining = merge_square_like_images(
-                                remaining_images, images_cache_dir,
-                                tolerance_percent=bot.get_config('setting', {}).get('mergeTolerance', 5.0)
-                            )
-                            if square_merged:
-                                # 发送1:1图片拼接结果
-                                chain.image([square_merged])
-                                # 如果还有剩余图片，也发送
-                                if final_remaining:
-                                    chain.image(final_remaining)
-                            else:
-                                # 没有任何拼接，直接发送剩余图片
-                                chain.image(remaining_images)
-                else:
-                    chain.image(image_paths)  # 拼接失败，发送原图
-            elif image_paths:
-                chain.image(image_paths)
-            
-            # 处理GIF文件
-            if gif_paths:
-                # 检查是否为ComWeChat实例
-                if is_comwechat_instance(data.instance):
-                    from .helper import compress_gif_for_wechat
-                    for gif_path in gif_paths:
-                        compressed_path = await compress_gif_for_wechat(gif_path, images_cache_dir)
-                        if compressed_path:
-                            chain.face(compressed_path)
-                else:
-                    # 非ComWeChat实例，直接发送GIF作为图片
-                    chain.image(gif_paths)
-        
-        # 添加原文链接
-        if content.source_url and not isinstance(data.instance, QQGuildBotInstance):
-            chain.text(f'\n\n原文链接: {content.source_url}')
-        
-        return chain
-        
-    except Exception as e:
-        from .helper import debug_log
-        debug_log(f"构建聚合消息失败: {e}", force=True, bot_instance=bot)
-        print(f"构建聚合消息失败: {e}")
-        return Chain(data).text('消息构建失败')
+@bot.on_message(group_id='weibo', keywords=['关闭微博推送'])
+async def _(data: Message):
+    if not data.is_admin:
+        return Chain(data).text('抱歉，微博推送只能由管理员设置')
+
+    GroupSetting.update(send_weibo=0).where(
+        GroupSetting.group_id == data.channel_id,
+        GroupSetting.bot_id == data.instance.appid,
+    ).execute()
+
+    return Chain(data).text('已在本群关闭微博推送')
 
 
-async def download_media_file(url: str, cache_dir: str) -> Optional[str]:
-    """下载媒体文件到本地缓存"""
-    try:
-        from amiyabot.network.download import download_async
-        from core.util import create_dir
-        
-        # 从URL获取文件名
-        name = url.split('/')[-1]
-        if '?' in name:
-            name = name.split('?')[0]
-        if not name or '.' not in name:
-            name = f"{int(time.time())}.jpg"
-        
-        path = os.path.join(cache_dir, name)
-        create_dir(path, is_file=True)
-        
-        if not os.path.exists(path):
-            stream = await download_async(url)
-            if stream:
-                with open(path, 'wb') as f:
-                    f.write(stream)
-                return path
+@bot.on_message(group_id='weibo', keywords=['微博'])
+async def _(data: Message):
+    listens: list = bot.get_config('listen')
+    text = data.text.replace('微博', '').replace('最新', '')
+    for prefix in data.instance.bot.prefix_keywords:
+        text = text.replace(prefix, '').strip()
+
+    weibo = None
+    # 如果指定了具体用户名
+    if text:
+        name_map = {item['name']: item for item in listens}
+        name = find_most_similar(text, list(name_map.keys()))
+        if name:
+            weibo = name_map[name]['uid']
+
+    # 如果只有一个用户，直接使用
+    if not weibo:
+        if len(listens) == 1:
+            weibo = listens[0]['uid']
         else:
-            return path
-        
-        return None
-        
-    except Exception as e:
-        from .helper import debug_log
-        debug_log(f"下载媒体文件失败: {e}", force=True)
-        print(f"下载媒体文件失败: {e}")
-        return None
+            # 多个用户时，让用户选择
+            md = '回复序号选择已订阅的微博用户：\n\n|序号|微博ID|备注|\n|----|----|----|\n'
+            for index, item in enumerate(listens):
+                md += '|{index}|{uid}|{name}|\n'.format(index=index + 1, **item)
 
+            wait = await data.wait(Chain(data).markdown(md))
+            if not wait:
+                return None
 
-# ========== 聚合推送定时任务 ==========
-
-@bot.timed_task(each=60)  # 聚合推送使用60秒间隔
-async def aggregator_push_task(_):
-    """聚合推送定时任务"""
-    try:
-        # 添加定时任务执行日志
-        from .helper import debug_log
-        debug_log("执行聚合推送定时任务", bot_instance=bot)
-        
-        # 获取所有启用的订阅
-        enabled_subscriptions = aggregator_manager.get_enabled_subscriptions()
-        if not enabled_subscriptions:
-            debug_log(f"没有启用的订阅，跳过推送", bot_instance=bot)
-            return
-        
-        # 收集所有订阅的数据源ID
-        all_datasource_ids = set()
-        for sub in enabled_subscriptions:
-            all_datasource_ids.update(sub.get('datasource_ids', []))
-        
-        if not all_datasource_ids:
-            return
-        
-        # 更新数据源信息（确保映射关系是最新的）
-        datasources = await get_all_datasources()
-        if datasources:
-            aggregator_manager.update_datasources(datasources)
-            debug_log(f"更新了 {len(datasources)} 个数据源信息用于映射", bot_instance=bot)
-            
-            # 更新现有订阅的数据源名称（向后兼容）
-            updated_count = 0
-            for group_key, subscription in aggregator_manager.subscriptions.items():
-                if 'datasource_names' not in subscription:
-                    datasource_names = []
-                    for uuid_id in subscription.get('datasource_ids', []):
-                        ds_info = aggregator_manager.datasources.get(uuid_id)
-                        if ds_info:
-                            nickname = ds_info.get('nickname', '未知数据源')
-                            datasource_names.append(nickname)
-                    
-                    if datasource_names:
-                        subscription['datasource_names'] = datasource_names
-                        updated_count += 1
-            
-            if updated_count > 0:
-                aggregator_manager._save_subscriptions()
-                debug_log(f"更新了 {updated_count} 个订阅的数据源名称", bot_instance=bot)
-        else:
-            debug_log("获取数据源信息失败，可能影响数据源匹配", bot_instance=bot)
-        
-        # 获取聚合内容
-        from .helper import debug_log
-        debug_log(f"开始获取聚合内容，数据源数量: {len(all_datasource_ids)}", bot_instance=bot)
-        raw_contents = await get_aggregated_content(list(all_datasource_ids))
-        if not raw_contents:
-            debug_log("没有获取到内容，跳过推送", bot_instance=bot)
-            return
-        
-        debug_log(f"获取到 {len(raw_contents)} 条内容，开始处理", bot_instance=bot)
-        # 处理每条内容
-        for raw_data in raw_contents:
-            await process_single_aggregated_content(raw_data, enabled_subscriptions)
-            
-    except Exception as e:
-        from .helper import debug_log
-        debug_log(f"聚合推送任务失败: {e}", force=True, bot_instance=bot)
-        print(f"聚合推送任务失败: {e}")
-
-
-async def process_single_aggregated_content(raw_data: dict, subscriptions: List[dict]):
-    """处理单条聚合内容"""
-    try:
-        from .helper import debug_log
-        
-        # 转换为统一格式
-        content = adapt_content_to_unified(raw_data)
-        if not content:
-            debug_log("内容转换失败，跳过", bot_instance=bot)
-            return
-        
-        debug_log(f"处理内容: {content.content_id} 来自 {content.source_name}", bot_instance=bot)
-        
-        # 检查是否已推送过
-        existing_record = AggregatorRecord.get_or_none(
-            AggregatorRecord.content_id == content.content_id,
-            AggregatorRecord.platform == content.platform
-        )
-        if existing_record:
-            debug_log(f"内容已推送过，跳过: {content.content_id}", bot_instance=bot)
-            return
-        
-        # 查找订阅了该数据源的群组
-        target_subscriptions = []
-        debug_log(f"检查订阅匹配 - 内容source_id: {content.source_id}", bot_instance=bot)
-        debug_log(f"当前所有订阅: {[(sub.get('group_id'), sub.get('datasource_names', sub.get('datasource_ids'))) for sub in subscriptions]}", bot_instance=bot)
-        
-        for sub in subscriptions:
-            # 优先使用datasource_names，如果没有则回退到datasource_ids（向后兼容）
-            subscription_names = sub.get('datasource_names', [])
-            subscription_ids = sub.get('datasource_ids', [])
-            
-            debug_log(f"检查订阅 {sub.get('group_id')}: names={subscription_names}, ids={subscription_ids}", bot_instance=bot)
-            
-            # 按名称匹配
-            if content.source_id in subscription_names:
-                target_subscriptions.append(sub)
-                debug_log(f"找到名称匹配订阅: {sub.get('group_id')}", bot_instance=bot)
-            # 向后兼容：如果没有names字段，尝试用ID匹配
-            elif not subscription_names and content.source_id in subscription_ids:
-                target_subscriptions.append(sub)
-                debug_log(f"找到ID匹配订阅: {sub.get('group_id')}", bot_instance=bot)
-        
-        if not target_subscriptions:
-            debug_log(f"没有群组订阅该数据源，跳过: {content.source_id} ({content.source_name})", bot_instance=bot)
-            return
-        
-        # 内容屏蔽检查
-        for regex in bot.get_config("block", []):
-            if re.match(regex, html.unescape(content.text)) or re.search(regex, html.unescape(content.text)):
-                debug_log(f"内容触发屏蔽规则，跳过推送: {content.content_id}", bot_instance=bot)
-                
-                # 标记为已处理，避免重复通知
-                AggregatorRecord.create(
-                    content_id=content.content_id,
-                    platform=content.platform,
-                    datasource_id=content.source_id,
-                    record_time=int(time.time())
-                )
-                
-                await send_to_console_channel(
-                    Chain().text(f'聚合内容触发屏蔽规则，跳过推送\n来源: {content.source_name}\nID: {content.content_id}')
-                )
-                return
-        
-        # 标记为已推送
-        AggregatorRecord.create(
-            content_id=content.content_id,
-            platform=content.platform,
-            datasource_id=content.source_id,
-            record_time=int(time.time())
-        )
-        
-        # 发送到各个订阅群组
-        time_rec = TimeRecorder()
-        send_tasks = []
-        
-        await send_to_console_channel(
-            Chain().text(f'开始推送聚合内容\n来源: {content.source_name}\nID: {content.content_id}\n目标数: {len(target_subscriptions)}')
-        )
-        
-        for subscription in target_subscriptions:
             try:
-                instance = main_bot[subscription['bot_id']]
-                if not instance:
-                    continue
-                
-                # 构建消息链
-                chain = Chain()
-                header = f"【{content.source_name}】最新内容"
-                if content.publish_time:
-                    header += f"\n{content.publish_time.strftime('%Y-%m-%d %H:%M')}"
-                
-                # 获取文本长度限制（0表示不限制）
-                content_length = bot.get_config('setting', {}).get('contentPreviewLength', 0)
-                display_text = content.get_display_text(content_length)
-                full_text = f"{header}\n\n{html.unescape(display_text)}"
-                chain.text(full_text)
-                
-                # 处理媒体内容（下载图片/GIF）
-                if content.media_urls:
-                    setting = attridict(bot.get_config('setting'))
-                    cache_dir = setting.get('imagesCache', 'log/aggregator')
-                    
-                    # 分别处理图片和GIF
-                    image_paths = []
-                    gif_paths = []
-                    max_images = bot.get_config('setting', {}).get('maxImagesPerPost', 9)
-                    media_urls = content.media_urls if max_images <= 0 else content.media_urls[:max_images]
-                    
-                    for url in media_urls:
-                        path = await download_media_file(url, cache_dir)
-                        if path:
-                            from .helper import is_gif_file
-                            if is_gif_file(path):
-                                # 检查是否允许发送GIF
-                                if bot.get_config('setting', {}).get('sendGIF', True):
-                                    gif_paths.append(path)
-                            else:
-                                image_paths.append(path)
-                    
-                    # 处理图片拼接
-                    if image_paths and bot.get_config('setting', {}).get('mergeImages', False):
-                        from .helper import merge_images, merge_remaining_long_strips, merge_square_like_images
-                        merged_path, remaining_images = merge_images(image_paths, cache_dir, {
-                            'setting': bot.get_config('setting', {})
-                        })
-                        if merged_path:
-                            # 先发送拼接图片
-                            chain.image([merged_path])
-                            # 对剩余图片中的长条图进行左右拼接
-                            if remaining_images:
-                                long_strips_merged, final_remaining = merge_remaining_long_strips(
-                                    remaining_images, cache_dir,
-                                    aspect_ratio_threshold=bot.get_config('setting', {}).get('longStripThreshold', 1.5),
-                                    max_width=bot.get_config('setting', {}).get('maxMergedWidth', 2000)
-                                )
-                                if long_strips_merged:
-                                    # 发送长条图拼接结果
-                                    chain.image([long_strips_merged])
-                                    # 对剩余图片中的1:1图片进行拼接
-                                    if final_remaining:
-                                        square_merged, truly_final_remaining = merge_square_like_images(
-                                            final_remaining, cache_dir,
-                                            tolerance_percent=bot.get_config('setting', {}).get('mergeTolerance', 5.0)
-                                        )
-                                        if square_merged:
-                                            # 发送1:1图片拼接结果
-                                            chain.image([square_merged])
-                                            # 如果还有剩余图片，也发送
-                                            if truly_final_remaining:
-                                                chain.image(truly_final_remaining)
-                                        else:
-                                            # 没有1:1图片拼接，直接发送剩余图片
-                                            chain.image(final_remaining)
-                                else:
-                                    # 没有长条图拼接，尝试1:1图片拼接
-                                    square_merged, final_remaining = merge_square_like_images(
-                                        remaining_images, cache_dir,
-                                        tolerance_percent=bot.get_config('setting', {}).get('mergeTolerance', 5.0)
-                                    )
-                                    if square_merged:
-                                        # 发送1:1图片拼接结果
-                                        chain.image([square_merged])
-                                        # 如果还有剩余图片，也发送
-                                        if final_remaining:
-                                            chain.image(final_remaining)
-                                    else:
-                                        # 没有任何拼接，直接发送剩余图片
-                                        chain.image(remaining_images)
-                        else:
-                            chain.image(image_paths)  # 拼接失败，发送原图
-                    elif image_paths:
-                        chain.image(image_paths)
-                    
-                    # 处理GIF文件
-                    if gif_paths:
-                        # 检查是否为ComWeChat实例
-                        if is_comwechat_instance(instance.instance):
-                            from .helper import compress_gif_for_wechat
-                            for gif_path in gif_paths:
-                                compressed_path = await compress_gif_for_wechat(gif_path, cache_dir)
-                                if compressed_path:
-                                    chain.face(compressed_path)
-                        else:
-                            # 非ComWeChat实例，直接发送GIF作为图片
-                            chain.image(gif_paths)
-                
-                # 添加原文链接
-                if content.source_url and not isinstance(instance.instance, QQGuildBotInstance):
-                    chain.text(f'\n\n{content.source_url}')
-                
-                # 发送消息
-                if bot.get_config('sendAsync'):
-                    send_tasks.append(instance.send_message(chain, channel_id=subscription['group_id']))
-                else:
-                    await instance.send_message(chain, channel_id=subscription['group_id'])
-                    await asyncio.sleep(bot.get_config('sendInterval'))
-                    
-            except Exception as e:
-                from .helper import debug_log
-                debug_log(f"发送到群组 {subscription['group_id']} 失败: {e}", force=True, bot_instance=bot)
-                print(f"发送到群组 {subscription['group_id']} 失败: {e}")
-        
-        if send_tasks:
-            await asyncio.wait(send_tasks)
-        
-        await send_to_console_channel(
-            Chain().text(f'聚合推送完成\nID: {content.content_id}\n耗时: {time_rec.total()}')
-        )
-        
-    except Exception as e:
-        from .helper import debug_log
-        debug_log(f"处理聚合内容失败: {e}", force=True, bot_instance=bot)
-        print(f"处理聚合内容失败: {e}")
+                index = int(wait.text_digits.strip()) - 1
+                if 0 <= index < len(listens):
+                    weibo = listens[index]['uid']
+            except:
+                return None
+
+    if not weibo:
+        return Chain(data).text('博士，没有找到可用的微博用户配置...')
+
+    message = data.text_digits
+    index = 0
+
+    # 解析用户输入的序号
+    r = re.search(r'(\d+)', message)
+    if r:
+        index = abs(int(r.group(1)))
+
+    if '最新' in message:
+        index = 1
+
+    # 如果指定了序号，直接发送对应微博
+    if index:
+        return await send_by_index(index, weibo, data)
+    else:
+        # 显示历史微博列表
+        blog_list = WeiboRecord.get_weibo_list(
+            weibo, limit=10
+        )  # user_id是字符串类型，无需转换为int
+
+        if not blog_list:
+            return Chain(data).text(
+                '博士...暂时没有找到历史微博呢，请等待新微博推送吧~'
+            )
+
+        md = f'博士，这是【{blog_list[0].user_name}】的历史微博列表，回复【序号】来获取详情吧\n\n|序号|时间|内容|\n|----|----|----|\n'
+        for idx, item in enumerate(blog_list, 1):  # 使用enumerate获取序号
+            content = item.content.replace('\n', ' ').replace('|', '｜')
+            content_preview = content[:20] + ('...' if len(content) > 20 else '')
+            md += f'|{idx}|{item.created_at.replace("T", " ") or "未知时间"}|{content_preview}\n'  # 使用属性访问
+
+        reply = Chain(data).markdown(md)
+
+        wait = await data.wait(reply)
+        if wait:
+            r = re.search(r'(\d+)', wait.text_digits)
+            if r:
+                index = abs(int(r.group(1)))
+                return await send_by_index(index, weibo, wait, blog_list)
+
+
+@bot.timed_task(each=10)
+async def _(_: BotHandlerFactory):
+    await ws_manager.connect(skip=True)
