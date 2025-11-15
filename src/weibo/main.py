@@ -460,6 +460,15 @@ async def process_single_aggregated_content(raw_data: dict, subscriptions: List[
         for regex in bot.get_config("block", []):
             if re.match(regex, html.unescape(content.text)) or re.search(regex, html.unescape(content.text)):
                 debug_log(f"内容触发屏蔽规则，跳过推送: {content.content_id}", bot_instance=bot)
+                
+                # 标记为已处理，避免重复通知
+                AggregatorRecord.create(
+                    content_id=content.content_id,
+                    platform=content.platform,
+                    datasource_id=content.source_id,
+                    record_time=int(time.time())
+                )
+                
                 await send_to_console_channel(
                     Chain().text(f'聚合内容触发屏蔽规则，跳过推送\n来源: {content.source_name}\nID: {content.content_id}')
                 )
