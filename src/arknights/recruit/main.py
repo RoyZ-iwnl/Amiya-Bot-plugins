@@ -149,7 +149,7 @@ class RecruitPluginInstance(AmiyaBotPluginInstance):
 
 bot = RecruitPluginInstance(
     name='明日方舟公招查询',
-    version='2.9',
+    version='3.1',
     plugin_id='amiyabot-arknights-recruit',
     plugin_type='official',
     description='可通过指令或图像识别规划公招标签组合',
@@ -238,7 +238,7 @@ async def get_ocr_result(data: Message):
 
     if baidu.enable:
         res = await baidu.basic_accurate(data.image[0])
-        if not res:
+        if not res or 'words_result' not in res:
             res = await baidu.basic_general(data.image[0])
 
         if res and 'words_result' in res:

@@ -6,9 +6,6 @@
         "setting": {
             "title": "聚合推送设置",
             "type": "object",
-            "required": [
-                "checkRate"
-            ],
             "properties": {
                 "checkRate": {
                     "title": "检查频率",
