@@ -1,6 +1,11 @@
 setting:
     sendGIF: false
     imagesCache: logs/weibo
+    mergeImages: false
+    mergeTolerance: 5.0
+    longStripThreshold: 1.5
+    maxMergedWidth: 2000
+    maxImagesPerPost: 9
 
 websocket:
     url: wss://cdn.amiyabot.com/api/v1/weibo/ws

@@ -18,6 +18,36 @@
                     "description": "微博图片缓存的目录，可以为绝对路径",
                     "type": "string",
                     "default": "logs/weibo"
+                },
+                "mergeImages": {
+                    "title": "是否启用图片拼合",
+                    "description": "启用后会自动拼合尺寸一致的图片，减少消息数量",
+                    "type": "boolean",
+                    "default": false
+                },
+                "mergeTolerance": {
+                    "title": "尺寸容忍度",
+                    "description": "图片尺寸匹配的容忍度百分比，默认5.0表示允许5%的误差",
+                    "type": "number",
+                    "default": 5.0
+                },
+                "longStripThreshold": {
+                    "title": "长条图阈值",
+                    "description": "判断长条图的高宽比阈值，默认1.5表示高度是宽度的1.5倍以上",
+                    "type": "number",
+                    "default": 1.5
+                },
+                "maxMergedWidth": {
+                    "title": "拼接最大宽度",
+                    "description": "长条图左右拼接时的最大宽度限制（像素）",
+                    "type": "integer",
+                    "default": 2000
+                },
+                "maxImagesPerPost": {
+                    "title": "最大图片数",
+                    "description": "每条微博最多处理的图片数量，0表示不限制",
+                    "type": "integer",
+                    "default": 9
                 }
             }
         },

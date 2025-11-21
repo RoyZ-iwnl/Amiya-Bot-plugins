@@ -27,7 +27,13 @@ try:
 except ImportError:
     from core.util import AttrDict as attridict
 
-from .helper import WeiboWebSocketManager
+from .helper import (
+    WeiboWebSocketManager,
+    is_gif_file,
+    merge_images,
+    merge_remaining_long_strips,
+    merge_square_like_images,
+)
 
 curr_dir = Path(__file__).parent
 
@@ -193,6 +199,85 @@ async def process_weibo_data(recent_weibos: dict):
             images = json.loads(record.images) if record.images else []
             url = record.detail_url
 
+            # 图片拼合处理
+            if images and setting.get('mergeImages', False):
+                # 分离GIF和普通图片
+                gif_images = []
+                normal_images = []
+
+                max_images = setting.get('maxImagesPerPost', 9)
+                images_to_process = images if max_images <= 0 else images[:max_images]
+
+                for img_path in images_to_process:
+                    if is_gif_file(img_path):
+                        if setting.get('sendGIF', False):
+                            gif_images.append(img_path)
+                    else:
+                        normal_images.append(img_path)
+
+                # 对普通图片进行三级拼合
+                final_images = []
+
+                # 第一级：尺寸一致图片拼合
+                if normal_images:
+                    cache_dir = str(Path.cwd() / setting.get('imagesCache', 'logs/weibo'))
+                    merged_path, remaining_images = merge_images(
+                        normal_images,
+                        cache_dir,
+                        {'setting': bot.get_config('setting', {})}
+                    )
+
+                    if merged_path:
+                        final_images.append(merged_path)
+
+                        # 第二级：长条图拼接
+                        if remaining_images:
+                            long_strips_merged, final_remaining = merge_remaining_long_strips(
+                                remaining_images,
+                                cache_dir,
+                                aspect_ratio_threshold=setting.get('longStripThreshold', 1.5),
+                                max_width=setting.get('maxMergedWidth', 2000)
+                            )
+
+                            if long_strips_merged:
+                                final_images.append(long_strips_merged)
+
+                                # 第三级：1:1图片拼接
+                                if final_remaining:
+                                    square_merged, truly_final_remaining = merge_square_like_images(
+                                        final_remaining,
+                                        cache_dir,
+                                        tolerance_percent=setting.get('mergeTolerance', 5.0)
+                                    )
+
+                                    if square_merged:
+                                        final_images.append(square_merged)
+                                        if truly_final_remaining:
+                                            final_images.extend(truly_final_remaining)
+                                    else:
+                                        final_images.extend(final_remaining)
+                            else:
+                                # 没有长条图拼接，尝试1:1图片拼接
+                                square_merged, final_remaining = merge_square_like_images(
+                                    remaining_images,
+                                    cache_dir,
+                                    tolerance_percent=setting.get('mergeTolerance', 5.0)
+                                )
+
+                                if square_merged:
+                                    final_images.append(square_merged)
+                                    if final_remaining:
+                                        final_images.extend(final_remaining)
+                                else:
+                                    final_images.extend(remaining_images)
+                    else:
+                        # 拼接失败，使用原图
+                        final_images.extend(normal_images)
+
+                # 添加GIF图片
+                final_images.extend(gif_images)
+                images = final_images
+
             await send_to_console_channel(
                 Chain().text(
                     f"开始推送微博\nUSER: {record.user_name}\nID: {record.blog_id}\n目标数: {len(target_groups)}"
@@ -257,12 +342,95 @@ async def send_by_index(index: int, weibo: str, data: Message, blog_list=None):
         if not result:
             return Chain(data).text('博士...暂时无法获取这条微博的内容呢...')
 
+        # 获取图片列表
+        images = json.loads(result.images) if result.images else []
+
+        # 图片拼合处理
+        setting = attridict(bot.get_config('setting'))
+        if images and setting.get('mergeImages', False):
+            # 分离GIF和普通图片
+            gif_images = []
+            normal_images = []
+
+            max_images = setting.get('maxImagesPerPost', 9)
+            images_to_process = images if max_images <= 0 else images[:max_images]
+
+            for img_path in images_to_process:
+                if is_gif_file(img_path):
+                    if setting.get('sendGIF', False):
+                        gif_images.append(img_path)
+                else:
+                    normal_images.append(img_path)
+
+            # 对普通图片进行三级拼合
+            final_images = []
+
+            # 第一级：尺寸一致图片拼合
+            if normal_images:
+                cache_dir = str(Path.cwd() / setting.get('imagesCache', 'logs/weibo'))
+                merged_path, remaining_images = merge_images(
+                    normal_images,
+                    cache_dir,
+                    {'setting': bot.get_config('setting', {})}
+                )
+
+                if merged_path:
+                    final_images.append(merged_path)
+
+                    # 第二级：长条图拼接
+                    if remaining_images:
+                        long_strips_merged, final_remaining = merge_remaining_long_strips(
+                            remaining_images,
+                            cache_dir,
+                            aspect_ratio_threshold=setting.get('longStripThreshold', 1.5),
+                            max_width=setting.get('maxMergedWidth', 2000)
+                        )
+
+                        if long_strips_merged:
+                            final_images.append(long_strips_merged)
+
+                            # 第三级：1:1图片拼接
+                            if final_remaining:
+                                square_merged, truly_final_remaining = merge_square_like_images(
+                                    final_remaining,
+                                    cache_dir,
+                                    tolerance_percent=setting.get('mergeTolerance', 5.0)
+                                )
+
+                                if square_merged:
+                                    final_images.append(square_merged)
+                                    if truly_final_remaining:
+                                        final_images.extend(truly_final_remaining)
+                                else:
+                                    final_images.extend(final_remaining)
+                        else:
+                            # 没有长条图拼接，尝试1:1图片拼接
+                            square_merged, final_remaining = merge_square_like_images(
+                                remaining_images,
+                                cache_dir,
+                                tolerance_percent=setting.get('mergeTolerance', 5.0)
+                            )
+
+                            if square_merged:
+                                final_images.append(square_merged)
+                                if final_remaining:
+                                    final_images.extend(final_remaining)
+                            else:
+                                final_images.extend(remaining_images)
+                else:
+                    # 拼接失败，使用原图
+                    final_images.extend(normal_images)
+
+            # 添加GIF图片
+            final_images.extend(gif_images)
+            images = final_images
+
         # 构建回复
         chain = (
             Chain(data)
             .text(result.user_name + '\n')
             .text(result.content + '\n')
-            .image(json.loads(result.images) if result.images else [])
+            .image(images)
         )
 
         if not isinstance(data.instance, QQGuildBotInstance):
@@ -383,9 +551,10 @@ async def _(data: Message):
 
         md = f'博士，这是【{blog_list[0].user_name}】的历史微博列表，回复【序号】来获取详情吧\n\n|序号|时间|内容|\n|----|----|----|\n'
         for idx, item in enumerate(blog_list, 1):  # 使用enumerate获取序号
-            content = item.content.replace('\n', ' ').replace('|', '｜')
+            content = (item.content or '').replace('\n', ' ').replace('|', '｜')
             content_preview = content[:20] + ('...' if len(content) > 20 else '')
-            md += f'|{idx}|{item.created_at.replace("T", " ") or "未知时间"}|{content_preview}\n'  # 使用属性访问
+            created_time = (item.created_at or '未知时间').replace("T", " ") if item.created_at else "未知时间"
+            md += f'|{idx}|{created_time}|{content_preview}\n'  # 使用属性访问
 
         reply = Chain(data).markdown(md)
 
