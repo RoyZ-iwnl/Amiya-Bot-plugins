@@ -20,3 +20,5 @@ assistant-*
 src/weibo/claudehelper/*.*
 src/weibo/claudehelper
 *.pyc
+src/CeobeAPIALLINONE-PUSH/claudehelper/ceobe_api_guide - Copy.py
+src/CeobeAPIALLINONE-PUSH/claudehelper/改进总结报告.md

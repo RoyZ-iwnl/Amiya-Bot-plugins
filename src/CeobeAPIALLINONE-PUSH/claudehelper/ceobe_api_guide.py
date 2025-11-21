@@ -22,6 +22,7 @@ import json
 import time
 import sys
 import os
+import hashlib
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any, Tuple
 import threading
@@ -53,17 +54,20 @@ class CeobeAPIGuide:
         self.SERVER_BASE = 'https://server.ceobecanteen.top/api/v1/'
         self.SERVER_CDN_BASE = 'https://server-cdn.ceobecanteen.top/api/v1/'
         self.CDN_BASE = 'https://cdn.ceobecanteen.top/'
-        
+
         # 生成唯一客户端ID
         self.client_id = str(uuid.uuid4())
-        
+
         # 会话对象，用于复用连接
         self.session = requests.Session()
         self.session.headers.update(self.get_base_headers())
-        
+
         # 缓存数据
         self.datasources_cache = None
+        self.datasource_id_map = {}  # 新增：数据源ID映射表 {type:dataId -> unique_id}
+        self.combo_id_cache = {}     # 新增：组合ID缓存 {md5_hash -> combo_id}
         self.last_combo_id = None
+        self.last_cookie_id = None   # 新增：追踪最新的cookie_id
         self.last_cookie_info = None
         self.last_weibo_data = None
         
@@ -133,27 +137,39 @@ class CeobeAPIGuide:
         """获取所有数据源"""
         if self.datasources_cache and not force_refresh:
             return self.datasources_cache
-            
+
         print(f'\n{Colors.HEADER}=== 🔍 获取数据源列表 ==={Colors.ENDC}')
         url = f'{self.SERVER_BASE}canteen/config/datasource/list'
-        
+
         response = self.make_request(url, show_response=False)
         if response and response.get('code') == '00000':
             datasources = response.get('data', [])
             self.datasources_cache = datasources
-            
+
+            # 构建数据源ID映射表 (参考原项目 ServerUtil.js:104-111)
+            self.datasource_id_map = {}
+            for ds in datasources:
+                datasource_type = ds.get('datasource', '')
+                db_unique_key = ds.get('db_unique_key', '')
+                unique_id = ds.get('unique_id', '')
+                if datasource_type and db_unique_key and unique_id:
+                    map_key = f"{datasource_type}:{db_unique_key}"
+                    self.datasource_id_map[map_key] = unique_id
+
+            print(f'{Colors.OKGREEN}✅ 成功获取 {len(datasources)} 个数据源{Colors.ENDC}')
+            print(f'{Colors.OKBLUE}🗺️ 构建了 {len(self.datasource_id_map)} 个ID映射{Colors.ENDC}')
+
             # 统计各平台数据源
             platform_counts = {}
             for ds in datasources:
                 platform = ds.get('platform', '未知')
                 platform_counts[platform] = platform_counts.get(platform, 0) + 1
-            
-            print(f'{Colors.OKGREEN}✅ 成功获取 {len(datasources)} 个数据源{Colors.ENDC}')
+
             print(f'{Colors.OKBLUE}📊 平台分布:{Colors.ENDC}')
             for platform, count in sorted(platform_counts.items()):
                 emoji = self.get_platform_emoji(platform)
                 print(f'  {emoji} {platform}: {count} 个')
-            
+
             return datasources
         else:
             print(f'{Colors.FAIL}❌ 获取数据源列表失败{Colors.ENDC}')
@@ -198,84 +214,140 @@ class CeobeAPIGuide:
             print()
     
     def get_datasource_combo_id(self, datasource_ids: List[str]) -> Optional[str]:
-        """获取数据源组合ID"""
+        """获取数据源组合ID（带缓存机制，参考原项目 ServerUtil.js:210-249）"""
         print(f'\n{Colors.HEADER}=== 🔗 获取数据源组合ID ==={Colors.ENDC}')
         print(f'{Colors.OKBLUE}📝 数据源数量: {len(datasource_ids)}{Colors.ENDC}')
-        
+
+        # 生成缓存键（使用MD5哈希）
+        sorted_ids = sorted(datasource_ids)
+        cache_key = hashlib.md5(','.join(sorted_ids).encode('utf-8')).hexdigest()
+
+        # 检查缓存
+        if cache_key in self.combo_id_cache:
+            combo_id = self.combo_id_cache[cache_key]
+            print(f'{Colors.OKGREEN}✅ 使用缓存的组合ID: {combo_id}{Colors.ENDC}')
+            self.last_combo_id = combo_id
+            return combo_id
+
+        # 缓存未命中，请求API
         url = f'{self.SERVER_BASE}canteen/user/getDatasourceComb'
         data = {'datasource_push': datasource_ids}
-        
+
         response = self.make_request(url, 'POST', data, show_response=False)
         if response and response.get('code') == '00000':
             combo_id = response['data']['datasource_comb_id']
+
+            # 保存到缓存
+            self.combo_id_cache[cache_key] = combo_id
             self.last_combo_id = combo_id
-            print(f'{Colors.OKGREEN}✅ 组合ID: {combo_id}{Colors.ENDC}')
+
+            print(f'{Colors.OKGREEN}✅ 组合ID: {combo_id} (已缓存){Colors.ENDC}')
             return combo_id
         else:
             error_msg = response.get('message', '未知错误') if response else '请求失败'
             print(f'{Colors.FAIL}❌ 获取组合ID失败: {error_msg}{Colors.ENDC}')
             return None
     
-    def get_cookie_info(self, combo_id: str, max_retries: int = 3) -> Optional[Dict[str, str]]:
-        """获取cookie信息，包含重试逻辑"""
+    def get_cookie_info(self, combo_id: str, max_retries: int = 3, check_change: bool = False) -> Optional[Dict[str, str]]:
+        """获取cookie信息，包含重试逻辑和变化检测（参考原项目 CeobeCanteenCookieFetcher.js:50-76）"""
         print(f'\n{Colors.HEADER}=== 🍪 获取Cookie信息 ==={Colors.ENDC}')
         print(f'{Colors.OKBLUE}🔗 组合ID: {combo_id}{Colors.ENDC}')
-        
+
         url = f'{self.CDN_BASE}datasource-comb/{combo_id}'
-        
+
         for attempt in range(max_retries):
             if attempt > 0:
                 print(f'{Colors.WARNING}🔄 第 {attempt + 1} 次重试...{Colors.ENDC}')
                 time.sleep(2 ** attempt)  # 指数退避
-            
+
             response = self.make_request(url, show_response=False)
             if response:
                 cookie_id = response.get('cookie_id')
                 update_cookie_id = response.get('update_cookie_id')
-                
+
                 if cookie_id:
+                    # 检查Cookie ID是否变化（参考原项目的lastLatestCookieId机制）
+                    if check_change and self.last_cookie_id == cookie_id:
+                        print(f'{Colors.WARNING}⚠️ Cookie ID 未变化，无新内容{Colors.ENDC}')
+                        return None
+
                     print(f'{Colors.OKGREEN}✅ Cookie ID: {cookie_id}{Colors.ENDC}')
                     if update_cookie_id:
                         print(f'{Colors.OKGREEN}✅ Update Cookie ID: {update_cookie_id}{Colors.ENDC}')
-                    
+
+                    # 更新追踪的最新Cookie ID
+                    self.last_cookie_id = cookie_id
+
                     cookie_info = {
                         'cookie_id': cookie_id,
                         'update_cookie_id': update_cookie_id
                     }
                     self.last_cookie_info = cookie_info
                     return cookie_info
+                elif cookie_id is None:
+                    print(f'{Colors.WARNING}⚠️ Cookie ID 为 null，暂无新内容{Colors.ENDC}')
+                    return None
                 else:
                     print(f'{Colors.WARNING}⚠️ 尝试 {attempt + 1}: Cookie ID 为空{Colors.ENDC}')
             else:
                 print(f'{Colors.WARNING}⚠️ 尝试 {attempt + 1}: 请求失败{Colors.ENDC}')
-        
+
         print(f'{Colors.FAIL}❌ 多次尝试后仍无法获取有效的Cookie ID{Colors.ENDC}')
         return None
     
-    def get_weibo_data(self, combo_id: str, cookie_id: str, 
+    def get_weibo_data(self, combo_id: str, cookie_id: str,
                       update_cookie_id: Optional[str] = None) -> Optional[Dict]:
-        """获取微博数据"""
-        print(f'\n{Colors.HEADER}=== 📱 获取微博数据 ==={Colors.ENDC}')
-        
+        """获取微博数据（参考原项目 ServerUtil.js:252-292）"""
+        print(f'\n{Colors.HEADER}=== 📱 获取聚合数据 ==={Colors.ENDC}')
+
         # 构建URL
         url = f'{self.SERVER_CDN_BASE}cdn/cookie/mainList/cookieList'
         params = [f'datasource_comb_id={combo_id}', f'cookie_id={cookie_id}']
-        
+
+        # 先尝试带update_cookie_id的请求，失败后回退（参考原项目 ServerUtil.js:254-268）
         if update_cookie_id:
             params.append(f'update_cookie_id={update_cookie_id}')
-        
+
         full_url = url + '?' + '&'.join(params)
-        
+
         response = self.make_request(full_url, show_response=False)
+
+        # 如果带update_cookie_id失败，尝试不带的请求
+        if not response and update_cookie_id:
+            print(f'{Colors.WARNING}⚠️ 带update_cookie_id请求失败，尝试不带的请求{Colors.ENDC}')
+            params = [f'datasource_comb_id={combo_id}', f'cookie_id={cookie_id}']
+            full_url = url + '?' + '&'.join(params)
+            response = self.make_request(full_url, show_response=False)
+
         if response and response.get('code') == '00000':
             data = response.get('data', {})
             cookies = data.get('cookies', [])
             self.last_weibo_data = data
-            print(f'{Colors.OKGREEN}✅ 成功获取微博数据，共 {len(cookies)} 条{Colors.ENDC}')
+
+            # 提取微博图片URL（参考原项目 ServerUtil.js:276-289）
+            weibo_images = []
+            for cookie in cookies:
+                source_type = cookie.get('source', {}).get('type', '')
+                if source_type.startswith('weibo:'):
+                    images = cookie.get('default_cookie', {}).get('images', [])
+                    for img in images:
+                        if isinstance(img, dict):
+                            origin_url = img.get('origin_url')
+                            compress_url = img.get('compress_url')
+                            if origin_url:
+                                weibo_images.append(origin_url)
+                            if compress_url:
+                                weibo_images.append(compress_url)
+
+            if weibo_images:
+                print(f'{Colors.OKBLUE}📸 检测到 {len(weibo_images)} 个微博图片URL{Colors.ENDC}')
+                print(f'{Colors.WARNING}⚠️ 注意：访问微博图片需要添加 Referer: https://m.weibo.cn/{Colors.ENDC}')
+
+            print(f'{Colors.OKGREEN}✅ 成功获取数据，共 {len(cookies)} 条{Colors.ENDC}')
             return data
         else:
             error_msg = response.get('message', '未知错误') if response else '请求失败'
-            print(f'{Colors.FAIL}❌ 获取微博数据失败: {error_msg}{Colors.ENDC}')
+            print(f'{Colors.FAIL}❌ 获取数据失败: {error_msg}{Colors.ENDC}')
             return None
     
     def analyze_weibo_data(self, data: Dict) -> Dict[str, Any]:
@@ -427,16 +499,51 @@ class CeobeAPIGuide:
             
             print('-' * 80)
     
+    def get_datasource_config(self, combo_id: str) -> Optional[Dict]:
+        """获取数据源配置信息（参考原项目 ServerUtil.js:131）"""
+        print(f'\n{Colors.HEADER}=== ⚙️ 获取数据源配置 ==={Colors.ENDC}')
+        print(f'{Colors.OKBLUE}🔗 组合ID: {combo_id}{Colors.ENDC}')
+
+        url = f'{self.SERVER_BASE}canteen/config/fetcher/standaloneConfig/{combo_id}'
+
+        response = self.make_request(url, show_response=False)
+        if response and response.get('code') == '00000':
+            config = response.get('data', {})
+            groups = config.get('groups', [])
+
+            print(f'{Colors.OKGREEN}✅ 成功获取配置，包含 {len(groups)} 个数据源组{Colors.ENDC}')
+
+            # 显示配置摘要
+            for i, group in enumerate(groups):
+                group_type = group.get('type', '未知')
+                datasources = group.get('datasource', [])
+                intervals = group.get('interval_by_time_range', [])
+
+                print(f'{Colors.OKBLUE}  组 {i+1}: {group_type}{Colors.ENDC}')
+                print(f'    📊 数据源数量: {len(datasources)}')
+                if intervals:
+                    print(f'    ⏱️ 轮询间隔配置: {len(intervals)} 个时间段')
+                    for interval_config in intervals[:2]:  # 只显示前2个
+                        time_range = interval_config.get('time_range', [])
+                        interval = interval_config.get('interval', 0)
+                        print(f'       {time_range[0]}-{time_range[1]}: {interval}秒')
+
+            return config
+        else:
+            error_msg = response.get('message', '未知错误') if response else '请求失败'
+            print(f'{Colors.FAIL}❌ 获取配置失败: {error_msg}{Colors.ENDC}')
+            return None
+
     def export_data_to_json(self, data: Dict, filename: Optional[str] = None) -> str:
         """导出数据到JSON文件"""
         if not filename:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f'weibo_data_{timestamp}.json'
-        
+
         try:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            
+
             file_size = os.path.getsize(filename)
             print(f'{Colors.OKGREEN}✅ 数据已导出到: {filename}{Colors.ENDC}')
             print(f'{Colors.OKBLUE}📁 文件大小: {file_size:,} 字节{Colors.ENDC}')
@@ -445,6 +552,61 @@ class CeobeAPIGuide:
             print(f'{Colors.FAIL}❌ 导出失败: {e}{Colors.ENDC}')
             return ""
     
+    def continuous_polling(self, datasource_ids: List[str], interval: int = 60, max_iterations: int = 10):
+        """持续轮询获取新内容（参考原项目 CeobeCanteenCookieFetcher.js:50-76）"""
+        print(f'\n{Colors.HEADER}=== 🔄 开始持续轮询 ==={Colors.ENDC}')
+        print(f'{Colors.OKBLUE}📝 数据源数量: {len(datasource_ids)}{Colors.ENDC}')
+        print(f'{Colors.OKBLUE}⏱️ 轮询间隔: {interval}秒{Colors.ENDC}')
+        print(f'{Colors.OKBLUE}🔢 最大迭代次数: {max_iterations}{Colors.ENDC}')
+        print(f'{Colors.WARNING}💡 提示：按 Ctrl+C 可随时停止轮询{Colors.ENDC}')
+        print("-" * 80)
+
+        # 获取组合ID
+        combo_id = self.get_datasource_combo_id(datasource_ids)
+        if not combo_id:
+            print(f'{Colors.FAIL}❌ 无法获取组合ID，轮询终止{Colors.ENDC}')
+            return
+
+        iteration = 0
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+                print(f'\n{Colors.HEADER}【第 {iteration}/{max_iterations} 次轮询】{Colors.ENDC}')
+                print(f'{Colors.OKCYAN}时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}{Colors.ENDC}')
+
+                # 获取Cookie信息，启用变化检测
+                cookie_info = self.get_cookie_info(combo_id, check_change=True)
+
+                if cookie_info:
+                    # 有新内容，获取数据
+                    weibo_data = self.get_weibo_data(
+                        combo_id,
+                        cookie_info['cookie_id'],
+                        cookie_info.get('update_cookie_id')
+                    )
+
+                    if weibo_data:
+                        # 显示简要分析
+                        analysis = self.analyze_weibo_data(weibo_data)
+                        print(f'\n{Colors.OKGREEN}✅ 发现新内容: {analysis["total_count"]} 条{Colors.ENDC}')
+
+                        # 询问是否查看详情
+                        if iteration < max_iterations:
+                            print(f'{Colors.OKCYAN}下次轮询将在 {interval} 秒后开始...{Colors.ENDC}')
+                else:
+                    print(f'{Colors.WARNING}⚠️ 暂无新内容{Colors.ENDC}')
+                    if iteration < max_iterations:
+                        print(f'{Colors.OKCYAN}下次轮询将在 {interval} 秒后开始...{Colors.ENDC}')
+
+                # 等待下次轮询
+                if iteration < max_iterations:
+                    time.sleep(interval)
+
+        except KeyboardInterrupt:
+            print(f'\n{Colors.WARNING}⚠️ 用户中断轮询{Colors.ENDC}')
+
+        print(f'\n{Colors.OKGREEN}✅ 轮询结束，共执行 {iteration} 次{Colors.ENDC}')
+
     def show_main_menu(self):
         """显示主菜单"""
         menu_text = f"""
@@ -452,17 +614,19 @@ class CeobeAPIGuide:
 
 {Colors.OKGREEN}1.{Colors.ENDC} 🔍 查看所有数据源
 {Colors.OKGREEN}2.{Colors.ENDC} 📱 查看微博数据源
-{Colors.OKGREEN}3.{Colors.ENDC} 📺 查看B站数据源  
+{Colors.OKGREEN}3.{Colors.ENDC} 📺 查看B站数据源
 {Colors.OKGREEN}4.{Colors.ENDC} 🎵 查看网易云音乐数据源
 {Colors.OKGREEN}5.{Colors.ENDC} 🎮 查看游戏相关数据源
 {Colors.OKGREEN}6.{Colors.ENDC} 🚀 快速获取微博数据
 {Colors.OKGREEN}7.{Colors.ENDC} ⚙️ 自定义数据源组合查询
 {Colors.OKGREEN}8.{Colors.ENDC} 📊 查看上次数据分析
 {Colors.OKGREEN}9.{Colors.ENDC} 💾 导出上次获取的数据
+{Colors.OKGREEN}10.{Colors.ENDC} 🔄 持续轮询模式（新增）
+{Colors.OKGREEN}11.{Colors.ENDC} ⚙️ 查看数据源配置（新增）
 {Colors.OKGREEN}0.{Colors.ENDC} 🚪 退出程序
 
 {Colors.OKCYAN}请输入选项编号:{Colors.ENDC} """
-        
+
         return input(menu_text).strip()
     
     def handle_view_datasources(self, platform_filter: Optional[str] = None):
@@ -537,37 +701,37 @@ class CeobeAPIGuide:
     def handle_custom_query(self):
         """处理自定义数据源组合查询"""
         print(f'{Colors.HEADER}⚙️ 自定义数据源组合查询{Colors.ENDC}')
-        
+
         datasources = self.get_all_datasources()
         if not datasources:
             return
-        
+
         # 显示所有数据源供选择
         self.display_datasources(datasources)
-        
+
         print(f'\n{Colors.OKCYAN}请输入要查询的数据源编号，用逗号分隔 (如: 1,3,5):{Colors.ENDC}')
         selection = input().strip()
-        
+
         if not selection:
             return
-        
+
         try:
             indices = [int(x.strip()) - 1 for x in selection.split(',')]
             selected_sources = [datasources[i] for i in indices if 0 <= i < len(datasources)]
         except (ValueError, IndexError):
             print(f'{Colors.FAIL}❌ 输入格式有误{Colors.ENDC}')
             return
-        
+
         if not selected_sources:
             print(f'{Colors.FAIL}❌ 未选择有效的数据源{Colors.ENDC}')
             return
-        
+
         print(f'{Colors.OKGREEN}✅ 已选择 {len(selected_sources)} 个数据源{Colors.ENDC}')
-        
+
         # 获取组合ID并查询数据
         datasource_ids = [ds.get('unique_id') for ds in selected_sources if ds.get('unique_id')]
         combo_id = self.get_datasource_combo_id(datasource_ids)
-        
+
         if combo_id:
             cookie_info = self.get_cookie_info(combo_id)
             if cookie_info:
@@ -576,11 +740,20 @@ class CeobeAPIGuide:
                     cookie_info['cookie_id'],
                     cookie_info.get('update_cookie_id')
                 )
-                
+
                 if weibo_data:
                     analysis = self.analyze_weibo_data(weibo_data)
                     self.display_analysis(analysis)
-        
+
+                    # 询问是否查看详细内容
+                    show_details = input(f'\n{Colors.OKCYAN}是否查看详细内容? (y/n): {Colors.ENDC}').strip().lower()
+                    if show_details in ['y', 'yes', '是']:
+                        try:
+                            limit = int(input(f'{Colors.OKCYAN}显示多少条? (默认10): {Colors.ENDC}') or "10")
+                        except ValueError:
+                            limit = 10
+                        self.display_weibo_details(weibo_data, limit)
+
         input(f"\n{Colors.OKCYAN}按回车键继续...{Colors.ENDC}")
     
     def handle_view_last_analysis(self):
@@ -608,7 +781,61 @@ class CeobeAPIGuide:
         else:
             filename = input(f'{Colors.OKCYAN}请输入文件名 (按回车使用默认名称): {Colors.ENDC}').strip()
             self.export_data_to_json(self.last_weibo_data, filename if filename else None)
-        
+
+        input(f"\n{Colors.OKCYAN}按回车键继续...{Colors.ENDC}")
+
+    def handle_continuous_polling(self):
+        """处理持续轮询"""
+        print(f'{Colors.HEADER}🔄 持续轮询模式{Colors.ENDC}')
+
+        # 获取数据源
+        datasources = self.get_all_datasources()
+        if not datasources:
+            return
+
+        # 显示所有数据源供选择
+        self.display_datasources(datasources)
+
+        print(f'\n{Colors.OKCYAN}请输入要轮询的数据源编号，用逗号分隔 (如: 1,3,5):{Colors.ENDC}')
+        selection = input().strip()
+
+        if not selection:
+            return
+
+        try:
+            indices = [int(x.strip()) - 1 for x in selection.split(',')]
+            selected_sources = [datasources[i] for i in indices if 0 <= i < len(datasources)]
+        except (ValueError, IndexError):
+            print(f'{Colors.FAIL}❌ 输入格式有误{Colors.ENDC}')
+            return
+
+        if not selected_sources:
+            print(f'{Colors.FAIL}❌ 未选择有效的数据源{Colors.ENDC}')
+            return
+
+        # 获取轮询参数
+        try:
+            interval = int(input(f'{Colors.OKCYAN}请输入轮询间隔（秒，默认60）: {Colors.ENDC}') or "60")
+            max_iterations = int(input(f'{Colors.OKCYAN}请输入最大轮询次数（默认10）: {Colors.ENDC}') or "10")
+        except ValueError:
+            interval = 60
+            max_iterations = 10
+
+        datasource_ids = [ds.get('unique_id') for ds in selected_sources if ds.get('unique_id')]
+        self.continuous_polling(datasource_ids, interval, max_iterations)
+
+        input(f"\n{Colors.OKCYAN}按回车键继续...{Colors.ENDC}")
+
+    def handle_view_config(self):
+        """处理查看数据源配置"""
+        print(f'{Colors.HEADER}⚙️ 查看数据源配置{Colors.ENDC}')
+
+        if self.last_combo_id:
+            print(f'{Colors.OKBLUE}使用上次的组合ID: {self.last_combo_id}{Colors.ENDC}')
+            self.get_datasource_config(self.last_combo_id)
+        else:
+            print(f'{Colors.WARNING}⚠️ 没有可用的组合ID，请先执行查询操作{Colors.ENDC}')
+
         input(f"\n{Colors.OKCYAN}按回车键继续...{Colors.ENDC}")
     
     def handle_show_final_data(self):
@@ -713,6 +940,10 @@ class CeobeAPIGuide:
                     self.handle_view_last_analysis()
                 elif choice == '9':
                     self.handle_export_data()
+                elif choice == '10':
+                    self.handle_continuous_polling()
+                elif choice == '11':
+                    self.handle_view_config()
                 else:
                     print(f'{Colors.WARNING}⚠️ 无效选项，请重新输入{Colors.ENDC}')
                     time.sleep(1)
