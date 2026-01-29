@@ -5,6 +5,8 @@ import json
 from typing import Optional, List
 from pathlib import Path
 
+from PIL import Image
+
 from amiyabot import QQGuildBotInstance
 from amiyabot.factory import BotHandlerFactory
 from amiyabot.adapters.tencent.qqGroup import QQGroupBotInstance
@@ -27,13 +29,7 @@ try:
 except ImportError:
     from core.util import AttrDict as attridict
 
-from .helper import (
-    WeiboWebSocketManager,
-    is_gif_file,
-    merge_images,
-    merge_remaining_long_strips,
-    merge_square_like_images,
-)
+from .helper import WeiboWebSocketManager
 
 curr_dir = Path(__file__).parent
 
@@ -43,7 +39,7 @@ class WeiboPluginInstance(AmiyaBotPluginInstance): ...
 
 bot = WeiboPluginInstance(
     name='明日方舟微博推送',
-    version='4.0',
+    version='4.1',
     plugin_id='amiyabot-weibo',
     plugin_type='official',
     description='在明日方舟相关官微更新时自动推送到群',
@@ -79,6 +75,136 @@ class WeiboRecord(MessageBaseModel):
 
 # 全局WebSocket管理器
 ws_manager = WeiboWebSocketManager(config_provider=bot)
+
+
+def clean_image_cache(cache_dir: Path, retention_days: int):
+    """Remove cached files older than retention_days (days)."""
+
+    if retention_days <= 0:
+        return
+
+    cutoff = time.time() - retention_days * 86400
+
+    for path in cache_dir.rglob('*'):
+        if path.is_dir():
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except Exception:
+            continue
+
+
+def _read_image_sizes(image_paths: List[str], count: int) -> Optional[List[tuple]]:
+    """Read sizes of the first `count` images. Return list of (w,h) or None on failure."""
+    if len(image_paths) < count:
+        return None
+    sizes = []
+    try:
+        for p in image_paths[:count]:
+            with Image.open(p) as im:
+                sizes.append(im.size)
+        return sizes
+    except Exception:
+        return None
+
+
+def _select_uniform_count(image_paths: List[str]) -> int:
+    """Return the largest count among 9,6,3 where first `count` images share identical sizes."""
+    for c in (9, 6, 3):
+        sizes = _read_image_sizes(image_paths, c)
+        if not sizes:
+            continue
+        if len(set(sizes)) == 1:
+            return c
+    return 0
+
+
+def _build_three_strip(images: List[Image.Image]) -> Optional[Image.Image]:
+    """Compose 3 PIL images into a single horizontal strip (1 row, 3 columns)."""
+    if len(images) != 3:
+        return None
+    try:
+        cell_size = min(640, min(min(img.size) for img in images))
+        if cell_size <= 0:
+            return None
+        strip = Image.new('RGB', (cell_size * 3, cell_size), color=(0, 0, 0))
+        for idx, img in enumerate(images):
+            resized = img.convert('RGB').resize((cell_size, cell_size), Image.LANCZOS)
+            strip.paste(resized, (idx * cell_size, 0))
+        return strip
+    except Exception:
+        return None
+
+
+def build_three_strips_for_prefix(
+    image_paths: List[str], cache_dir: Path, blog_id: str
+) -> Optional[List[str]]:
+    """
+    According to requirement: to avoid 6-image layouts, check first 3n images' sizes.
+    If first 3/6/9 images have identical sizes, only merge those into 1-row-3-cols strips.
+    Return list of generated strip file paths, or None if not applicable.
+    """
+    count = _select_uniform_count(image_paths)
+    if count == 0:
+        return None
+
+    paths = []
+    try:
+        for i in range(0, count, 3):
+            imgs = []
+            for p in image_paths[i : i + 3]:
+                with Image.open(p) as im:
+                    imgs.append(im.copy().convert('RGB'))
+            strip = _build_three_strip(imgs)
+            if not strip:
+                return None
+            output_path = cache_dir / f"{blog_id}_strip_{i // 3 + 1}.jpg"
+            strip.save(output_path, format='JPEG', quality=90)
+            paths.append(str(output_path))
+        return paths
+    except Exception:
+        return None
+
+
+def build_square_uniform_grid(
+    image_paths: List[str], cache_dir: Path, blog_id: str
+) -> Optional[str]:
+    """
+    If first 3/6/9 images are square and have identical sizes, merge them into
+    a single grid image with rows = count/3 and columns = 3. Return output path.
+    """
+    count = _select_uniform_count(image_paths)
+    if count == 0:
+        return None
+    sizes = _read_image_sizes(image_paths, count)
+    if not sizes:
+        return None
+    # ensure all are squares
+    if any(w != h for (w, h) in sizes):
+        return None
+
+    try:
+        # determine cell size
+        cell_size = min(640, min(min(w, h) for (w, h) in sizes))
+        if cell_size <= 0:
+            return None
+
+        rows, cols = count // 3, 3
+        grid_img = Image.new('RGB', (cell_size * cols, cell_size * rows), color=(0, 0, 0))
+
+        for idx in range(count):
+            p = image_paths[idx]
+            with Image.open(p) as im:
+                im_rgb = im.convert('RGB').resize((cell_size, cell_size), Image.LANCZOS)
+            r, c = divmod(idx, 3)
+            grid_img.paste(im_rgb, (c * cell_size, r * cell_size))
+
+        output_path = cache_dir / f"{blog_id}_grid_{count}.jpg"
+        grid_img.save(output_path, format='JPEG', quality=90)
+        return str(output_path)
+    except Exception:
+        return None
 
 
 @ws_manager.register_message_handler("historical_weibos")
@@ -119,6 +245,9 @@ async def process_weibo_data(recent_weibos: dict):
                 if WeiboRecord.get_or_none(blog_id=blog_id):
                     continue  # 已存在，跳过
 
+                cache_dir = Path.cwd() / setting.get('imagesCache', 'logs/weibo')
+                cache_dir.mkdir(parents=True, exist_ok=True)
+
                 pics_files = []
                 for p in wb.get('pics', []) or []:
                     file = p.get('file')
@@ -132,12 +261,6 @@ async def process_weibo_data(recent_weibos: dict):
                         try:
                             pic_index = p.get('index', '')
                             cdn_url = f"https://cdn.amiyabot.com/api/v1/weibo/pic/{pic_index}/{file}"
-
-                            # 创建cache目录（使用运行路径）
-                            cache_dir = Path.cwd() / setting.get(
-                                'imagesCache', 'logs/weibo'
-                            )
-                            cache_dir.mkdir(parents=True, exist_ok=True)
 
                             # 判断文件是否已经存在
                             local_file_path = cache_dir / file
@@ -197,86 +320,14 @@ async def process_weibo_data(recent_weibos: dict):
             # 构建消息内容（按需求格式）
             header = f"来自 {wb.get('screen_name','')} 的最新微博\n\n{text_content}"
             images = json.loads(record.images) if record.images else []
+            if setting.get('autoImageGrid', False) and images:
+                cache_dir = Path.cwd() / setting.get('imagesCache', 'logs/weibo')
+                # 仅在前3/6/9张为正方形且同尺寸时进行合并（1×3、2×3、3×3）
+                grid_path = build_square_uniform_grid(images, cache_dir, record.blog_id)
+                if grid_path:
+                    merged_count = int(grid_path.split('_grid_')[-1].split('.jpg')[0])
+                    images = [grid_path] + images[merged_count:]
             url = record.detail_url
-
-            # 图片拼合处理
-            if images and setting.get('mergeImages', False):
-                # 分离GIF和普通图片
-                gif_images = []
-                normal_images = []
-
-                max_images = setting.get('maxImagesPerPost', 9)
-                images_to_process = images if max_images <= 0 else images[:max_images]
-
-                for img_path in images_to_process:
-                    if is_gif_file(img_path):
-                        if setting.get('sendGIF', False):
-                            gif_images.append(img_path)
-                    else:
-                        normal_images.append(img_path)
-
-                # 对普通图片进行三级拼合
-                final_images = []
-
-                # 第一级：尺寸一致图片拼合
-                if normal_images:
-                    cache_dir = str(Path.cwd() / setting.get('imagesCache', 'logs/weibo'))
-                    merged_path, remaining_images = merge_images(
-                        normal_images,
-                        cache_dir,
-                        {'setting': bot.get_config('setting', {})}
-                    )
-
-                    if merged_path:
-                        final_images.append(merged_path)
-
-                        # 第二级：长条图拼接
-                        if remaining_images:
-                            long_strips_merged, final_remaining = merge_remaining_long_strips(
-                                remaining_images,
-                                cache_dir,
-                                aspect_ratio_threshold=setting.get('longStripThreshold', 1.5),
-                                max_width=setting.get('maxMergedWidth', 2000)
-                            )
-
-                            if long_strips_merged:
-                                final_images.append(long_strips_merged)
-
-                                # 第三级：1:1图片拼接
-                                if final_remaining:
-                                    square_merged, truly_final_remaining = merge_square_like_images(
-                                        final_remaining,
-                                        cache_dir,
-                                        tolerance_percent=setting.get('mergeTolerance', 5.0)
-                                    )
-
-                                    if square_merged:
-                                        final_images.append(square_merged)
-                                        if truly_final_remaining:
-                                            final_images.extend(truly_final_remaining)
-                                    else:
-                                        final_images.extend(final_remaining)
-                            else:
-                                # 没有长条图拼接，尝试1:1图片拼接
-                                square_merged, final_remaining = merge_square_like_images(
-                                    remaining_images,
-                                    cache_dir,
-                                    tolerance_percent=setting.get('mergeTolerance', 5.0)
-                                )
-
-                                if square_merged:
-                                    final_images.append(square_merged)
-                                    if final_remaining:
-                                        final_images.extend(final_remaining)
-                                else:
-                                    final_images.extend(remaining_images)
-                    else:
-                        # 拼接失败，使用原图
-                        final_images.extend(normal_images)
-
-                # 添加GIF图片
-                final_images.extend(gif_images)
-                images = final_images
 
             await send_to_console_channel(
                 Chain().text(
@@ -312,9 +363,7 @@ async def process_weibo_data(recent_weibos: dict):
         )
     except Exception as e:
         # 捕获并记录异常，避免未处理的异常导致任务崩溃
-        await send_to_console_channel(
-            Chain().text(f"处理微博数据时发生错误: {str(e)}")
-        )
+        await send_to_console_channel(Chain().text(f"处理微博数据时发生错误: {str(e)}"))
 
 
 async def send_by_index(index: int, weibo: str, data: Message, blog_list=None):
@@ -342,90 +391,17 @@ async def send_by_index(index: int, weibo: str, data: Message, blog_list=None):
         if not result:
             return Chain(data).text('博士...暂时无法获取这条微博的内容呢...')
 
-        # 获取图片列表
-        images = json.loads(result.images) if result.images else []
-
-        # 图片拼合处理
-        setting = attridict(bot.get_config('setting'))
-        if images and setting.get('mergeImages', False):
-            # 分离GIF和普通图片
-            gif_images = []
-            normal_images = []
-
-            max_images = setting.get('maxImagesPerPost', 9)
-            images_to_process = images if max_images <= 0 else images[:max_images]
-
-            for img_path in images_to_process:
-                if is_gif_file(img_path):
-                    if setting.get('sendGIF', False):
-                        gif_images.append(img_path)
-                else:
-                    normal_images.append(img_path)
-
-            # 对普通图片进行三级拼合
-            final_images = []
-
-            # 第一级：尺寸一致图片拼合
-            if normal_images:
-                cache_dir = str(Path.cwd() / setting.get('imagesCache', 'logs/weibo'))
-                merged_path, remaining_images = merge_images(
-                    normal_images,
-                    cache_dir,
-                    {'setting': bot.get_config('setting', {})}
-                )
-
-                if merged_path:
-                    final_images.append(merged_path)
-
-                    # 第二级：长条图拼接
-                    if remaining_images:
-                        long_strips_merged, final_remaining = merge_remaining_long_strips(
-                            remaining_images,
-                            cache_dir,
-                            aspect_ratio_threshold=setting.get('longStripThreshold', 1.5),
-                            max_width=setting.get('maxMergedWidth', 2000)
-                        )
-
-                        if long_strips_merged:
-                            final_images.append(long_strips_merged)
-
-                            # 第三级：1:1图片拼接
-                            if final_remaining:
-                                square_merged, truly_final_remaining = merge_square_like_images(
-                                    final_remaining,
-                                    cache_dir,
-                                    tolerance_percent=setting.get('mergeTolerance', 5.0)
-                                )
-
-                                if square_merged:
-                                    final_images.append(square_merged)
-                                    if truly_final_remaining:
-                                        final_images.extend(truly_final_remaining)
-                                else:
-                                    final_images.extend(final_remaining)
-                        else:
-                            # 没有长条图拼接，尝试1:1图片拼接
-                            square_merged, final_remaining = merge_square_like_images(
-                                remaining_images,
-                                cache_dir,
-                                tolerance_percent=setting.get('mergeTolerance', 5.0)
-                            )
-
-                            if square_merged:
-                                final_images.append(square_merged)
-                                if final_remaining:
-                                    final_images.extend(final_remaining)
-                            else:
-                                final_images.extend(remaining_images)
-                else:
-                    # 拼接失败，使用原图
-                    final_images.extend(normal_images)
-
-            # 添加GIF图片
-            final_images.extend(gif_images)
-            images = final_images
-
         # 构建回复
+        setting = attridict(bot.get_config('setting'))
+        images = json.loads(result.images) if result.images else []
+        if setting.get('autoImageGrid', False) and images:
+            cache_dir = Path.cwd() / setting.get('imagesCache', 'logs/weibo')
+            # 仅在前3/6/9张为正方形且同尺寸时进行合并（1×3、2×3、3×3）
+            grid_path = build_square_uniform_grid(images, cache_dir, result.blog_id)
+            if grid_path:
+                merged_count = int(grid_path.split('_grid_')[-1].split('.jpg')[0])
+                images = [grid_path] + images[merged_count:]
+
         chain = (
             Chain(data)
             .text(result.user_name + '\n')
@@ -551,10 +527,9 @@ async def _(data: Message):
 
         md = f'博士，这是【{blog_list[0].user_name}】的历史微博列表，回复【序号】来获取详情吧\n\n|序号|时间|内容|\n|----|----|----|\n'
         for idx, item in enumerate(blog_list, 1):  # 使用enumerate获取序号
-            content = (item.content or '').replace('\n', ' ').replace('|', '｜')
+            content = item.content.replace('\n', ' ').replace('|', '｜')
             content_preview = content[:20] + ('...' if len(content) > 20 else '')
-            created_time = (item.created_at or '未知时间').replace("T", " ") if item.created_at else "未知时间"
-            md += f'|{idx}|{created_time}|{content_preview}\n'  # 使用属性访问
+            md += f'|{idx}|{item.created_at.replace("T", " ") or "未知时间"}|{content_preview}\n'  # 使用属性访问
 
         reply = Chain(data).markdown(md)
 
@@ -569,3 +544,18 @@ async def _(data: Message):
 @bot.timed_task(each=10)
 async def _(_: BotHandlerFactory):
     await ws_manager.connect(skip=True)
+
+
+@bot.timed_task(trigger='cron', hour=0)
+async def clean_cache_task(_: BotHandlerFactory):
+    setting = attridict(bot.get_config('setting'))
+    retention = int(setting.get('cacheRetentionDays', 0) or 0)
+    if retention <= 0:
+        return
+
+    cache_dir = Path.cwd() / setting.get('imagesCache', 'logs/weibo')
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    clean_image_cache(cache_dir, retention)
+    await send_to_console_channel(
+        Chain().text(f'微博缓存清理完成，保留 {retention} 天以内文件')
+    )
