@@ -298,6 +298,8 @@ def adapt_content_to_unified(raw_data: Dict[str, Any]) -> Optional[UnifiedConten
             platform = 'weibo'
         elif 'music.163.com' in item_url or '网易云音乐' in datasource_name:
             platform = 'netease-cloud-music'
+        elif 'endfield' in datasource_name.lower() or '终末地' in datasource_name:
+            platform = 'endfield-game'
         elif 'arknights' in datasource_name.lower() or '明日方舟' in datasource_name:
             if '游戏' in datasource_name:
                 platform = 'arknights-game'
@@ -507,14 +509,15 @@ class AggregatorSubscriptionManager:
     def generate_datasource_menu(self, supported_platforms: List[str] = None) -> Tuple[str, Dict[int, str]]:
         """生成数据源选择菜单"""
         if not supported_platforms:
-            supported_platforms = ['weibo', 'bilibili', 'netease-cloud-music', 'arknights-game', 'arknights-website']
-        
+            supported_platforms = ['weibo', 'bilibili', 'netease-cloud-music', 'arknights-game', 'arknights-website', 'endfield-game']
+
         platform_names = {
             'weibo': '微博',
             'bilibili': 'B站',
             'netease-cloud-music': '网易云音乐',
             'arknights-game': '明日方舟游戏',
-            'arknights-website': '明日方舟官网'
+            'arknights-website': '明日方舟官网',
+            'endfield-game': '终末地游戏'
         }
         
         menu_text = "请选择要订阅的数据源（回复数字，多个用逗号分隔）：\n\n"

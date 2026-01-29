@@ -86,7 +86,7 @@ async def enable_aggregator_push(data: Message):
         aggregator_manager.update_datasources(datasources)
         
         # 生成数据源选择菜单
-        supported_platforms = ['weibo', 'bilibili', 'netease-cloud-music', 'arknights-game', 'arknights-website']
+        supported_platforms = ['weibo', 'bilibili', 'netease-cloud-music', 'arknights-game', 'arknights-website', 'endfield-game']
         menu_text, index_map = aggregator_manager.generate_datasource_menu(supported_platforms)
         
         if not index_map:

@@ -80,9 +80,9 @@
                     "title": "拼接图片最大宽度",
                     "description": "长条图拼接后的最大宽度限制（像素）",
                     "type": "integer",
-                    "default": 2000,
+                    "default": 10000,
                     "minimum": 500,
-                    "maximum": 5000
+                    "maximum": 20000
                 }
             },
             "additionalProperties": false
@@ -128,18 +128,20 @@
                         "type": "string",
                         "enum": [
                             "weibo",
-                            "bilibili", 
+                            "bilibili",
                             "netease-cloud-music",
                             "arknights-game",
-                            "arknights-website"
+                            "arknights-website",
+                            "endfield-game"
                         ]
                     },
                     "default": [
                         "weibo",
                         "bilibili",
-                        "netease-cloud-music", 
+                        "netease-cloud-music",
                         "arknights-game",
-                        "arknights-website"
+                        "arknights-website",
+                        "endfield-game"
                     ]
                 }
             },
